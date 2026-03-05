@@ -1,0 +1,41 @@
+# created by virtualenv automatically
+# --- Python 基础忽略项 ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.library/
+Lib/
+venv/
+.venv/
+ENV/
+env/
+Scripts/
+pyvenv.cfg
+
+# --- PyCharm / IDE 忽略项 ---
+.idea/
+.vscode/
+*.swp
+*.iml
+
+# --- 打包工具 (PyInstaller) 忽略项 ---
+# 打包时生成的临时文件夹，不需要上传
+build/
+dist/
+*.spec
+
+# --- 本地数据与日志 (重要) ---
+# 忽略所有日志文件，防止把测试用的私密数据传上去
+*.txt
+*.log
+*.csv
+
+# --- 配置文件策略 ---
+# 如果你的 protocol.json 包含敏感的私有协议，建议忽略它
+# 或者你可以保留它，但忽略掉本地备份
+# protocol.json
+
+# --- 操作系统忽略项 ---
+.DS_Store
+Thumbs.db
