@@ -611,16 +611,47 @@ class EcuMainWindow(QMainWindow):
 
     def _populate_tree(self, parent_item, data_node):
         if isinstance(data_node, dict):
-            for key, val in data_node.items():
+            # 获取当前字典的所有键
+            keys = list(data_node.keys())
+
+            # ====== 新增：强制显示顺序干预逻辑 ======
+            # 1. 强制把 'time' (时间) 移到绝对的第一行
+            if 'time' in keys:
+                keys.remove('time')
+                keys.insert(0, 'time')
+
+            # 2. 针对 0x52，把 RTK 状态及动静属性强制移到 'pkg_count' 之前
+            if 'pkg_count' in keys:
+                rtk_fields = ["Bit00_03_RTK状态", "Bit04_超速指示", "Bit05_静态位置"]
+
+                # 先把这些 RTK 字段从当前顺序中抽出来
+                extracted = []
+                for f in rtk_fields:
+                    if f in keys:
+                        keys.remove(f)
+                        extracted.append(f)
+
+                # 找到 pkg_count 的位置，把抽出来的字段插到它前面
+                if extracted:
+                    pkg_idx = keys.index('pkg_count')
+                    for f in reversed(extracted):  # 反向插入以保持它们之间的原有顺序
+                        keys.insert(pkg_idx, f)
+            # ========================================
+
+            # 按照调整后的顺序添加到界面树状图中
+            for key in keys:
+                val = data_node[key]
                 if isinstance(val, (dict, list)):
                     node = QStandardItem(str(key))
                     node.setForeground(Qt.GlobalColor.darkBlue)
                     parent_item.appendRow(node)
-                    self._populate_tree(node, val)
+                    self._populate_tree(node, val)  # 递归处理
                 else:
                     item = QStandardItem(f"{key}: {val}")
                     parent_item.appendRow(item)
+
         elif isinstance(data_node, list):
+            # 列表逻辑保持不变
             for i, item in enumerate(data_node):
                 if isinstance(item, (dict, list)):
                     node = QStandardItem(f"[{i}]")
