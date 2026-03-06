@@ -5,12 +5,14 @@ import struct
 import re
 import binascii
 import csv
+
 from datetime import datetime
 
 # 导入 PyQt6 核心组件
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
-                             QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView)
+                             QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
+                             )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel
 from PyQt6.QtGui import QStandardItemModel, QStandardItem, QFont
 
@@ -397,6 +399,31 @@ class EcuMainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
+        # --- 新增：顶部快速解析栏 ---
+        self.quick_parse_layout = QHBoxLayout()
+
+        self.quick_parse_input = QLineEdit()
+        self.quick_parse_input.setPlaceholderText("在此粘贴单条或多条原始 Hex 报文 (例如: 42 44 51...)")
+        self.quick_parse_input.setClearButtonEnabled(True)  # 右侧自带一个小叉叉用来一键清空
+
+        self.quick_parse_btn = QPushButton("🚀 快速解析")
+        self.quick_parse_btn.setFixedWidth(100)  # 固定按钮宽度，让它看起来更精致
+
+        # 将输入框和按钮加入水平布局
+        self.quick_parse_layout.addWidget(self.quick_parse_input)
+        self.quick_parse_layout.addWidget(self.quick_parse_btn)
+
+        # 【注意】请将下面这行代码里的 main_layout 替换为您代码中实际的总垂直布局变量名！
+        # 例如您原本可能是 self.main_layout.addWidget(self.table_view)
+        # 那么就在那行前面加上：
+        main_layout.addLayout(self.quick_parse_layout)
+
+        # 绑定按钮点击事件
+        self.quick_parse_btn.clicked.connect(self.on_quick_parse_clicked)
+        # 绑定回车键事件（在输入框里敲回车也能直接解析）
+        self.quick_parse_input.returnPressed.connect(self.on_quick_parse_clicked)
+        # ---------------------------
+
         # 1. 顶部控制栏
         control_layout = QHBoxLayout()
 
@@ -454,6 +481,52 @@ class EcuMainWindow(QMainWindow):
         # 设置初始上下比例 6:4
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
+
+    def on_quick_parse_clicked(self):
+        import traceback
+
+        try:
+            # 1. 获取输入框的原始文本
+            raw_text = self.quick_parse_input.text().strip()
+            if not raw_text:
+                return
+
+            # 2. 拿到解析器实例
+            parser = getattr(self, 'parser', None)
+            if parser is None:
+                # 如果当前没有加载过日志，实例化一个临时的解析器
+                parser = StreamParser(self.decoder)
+
+            # 3. 核心修复：直接调用 feed() 方法，它会自动处理字符串！
+            parsed_frames = parser.feed(raw_text)
+
+            if not parsed_frames:
+                QMessageBox.warning(self, "解析失败",
+                                    "未能识别出有效的协议帧。\n请检查数据是否包含完整的 4244 包头及正确的长度。")
+                return
+
+            # 4. 更新表格模型
+            self.table_model.layoutAboutToBeChanged.emit()
+
+            for frame in parsed_frames:
+                frame['seq'] = "手动"  # 给序列号打个标记
+                self.table_model._data.append(frame)
+
+            self.table_model.layoutChanged.emit()
+
+            # 5. 滚动到底部并选中最新行
+            last_row_index = len(self.table_model._data) - 1
+            model_index = self.table_model.index(last_row_index, 0)
+            self.table_view.scrollToBottom()
+            self.table_view.setCurrentIndex(model_index)
+
+            # 6. 联动下方的树状图展示详情
+            if hasattr(self, 'on_table_clicked'):
+                self.on_table_clicked(model_index)
+
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            QMessageBox.critical(self, "程序崩溃拦截", f"底层解析抛出异常：\n\n{error_msg}")
 
     def load_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择日志文件", "", "Text Files (*.txt *.log);;All Files (*)")
