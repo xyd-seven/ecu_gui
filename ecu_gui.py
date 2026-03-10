@@ -79,13 +79,14 @@ class ProtocolDecoder:
             val = str(int(hex_str, 16))
         # ==========================================================
         # ====== 新增：UTC 绝对秒转北京时间字符串 ======
+            # ====== 新增：UTC 绝对秒转北京时间字符串 ======
         elif f_type == 'TIMESTAMP_BJ':
-            import struct, datetime
+            import datetime as dt_mod  # 【核心修复】：使用别名导入，绝对不干扰全局的 struct 和 datetime！
             # 1. 先按 4 字节无符号整数解包出秒数
             seconds = struct.unpack('>I', chunk)[0]
             try:
                 # 2. 从 UTC 时间戳加上 8 小时偏移量，格式化为易读的字符串
-                dt = datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc) + datetime.timedelta(hours=8)
+                dt = dt_mod.datetime.fromtimestamp(seconds, dt_mod.timezone.utc) + dt_mod.timedelta(hours=8)
                 val = dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 val = str(seconds)  # 万一转换失败，兜底显示原始数字
@@ -564,6 +565,8 @@ class EcuMainWindow(QMainWindow):
         # 设置初始上下比例 6:4
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
+        # ✅ 【修复】：在所有 UI 控件都初始化完毕后，再触发一次协议加载
+        self.change_protocol()
 
     def populate_protocols(self):
         """扫描当前目录下的所有 json 文件，并加载到下拉框中"""
@@ -612,6 +615,12 @@ class EcuMainWindow(QMainWindow):
             raw_text = self.quick_parse_input.text().strip()
             if not raw_text:
                 return
+
+            # ====== 【新增的防御代码】：检查 decoder 是否存在 ======
+            if self.decoder is None:
+                QMessageBox.warning(self, "警告", "底层协议配置未加载！\n请检查左上角是否已选择 .json 协议文件。")
+                return
+            # ========================================================
 
             # 2. 拿到或创建解析器实例
             if not hasattr(self, 'parser'):
