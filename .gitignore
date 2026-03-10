@@ -41,3 +41,5 @@ dist/
 .DS_Store
 Thumbs.db
 /喵走ECU原始数据解析软件/
+/generate_yunmei_json.py
+/protocol_yunmei.json

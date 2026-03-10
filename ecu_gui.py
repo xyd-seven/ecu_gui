@@ -72,6 +72,24 @@ class ProtocolDecoder:
             val = self.parse_bcd(chunk)
         elif f_type == 'BYTES':
             val = binascii.hexlify(chunk).decode('ascii')
+        # ====== 新增：支持将任意长度的十六进制转换为十进制显示 ======
+        elif f_type == 'HEX2DEC':
+            hex_str = binascii.hexlify(chunk).decode('ascii')
+            # 转换为十进制后，将其转为字符串格式，防止 UI 显示科学计数法
+            val = str(int(hex_str, 16))
+        # ==========================================================
+        # ====== 新增：UTC 绝对秒转北京时间字符串 ======
+        elif f_type == 'TIMESTAMP_BJ':
+            import struct, datetime
+            # 1. 先按 4 字节无符号整数解包出秒数
+            seconds = struct.unpack('>I', chunk)[0]
+            try:
+                # 2. 从 UTC 时间戳加上 8 小时偏移量，格式化为易读的字符串
+                dt = datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc) + datetime.timedelta(hours=8)
+                val = dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                val = str(seconds)  # 万一转换失败，兜底显示原始数字
+        # ============================================
         # 【支持 BITFIELD_U2】
         elif f_type.startswith('BITFIELD_'):
             if f_type == 'BITFIELD_U4':
@@ -100,6 +118,9 @@ class ProtocolDecoder:
                         val = round(val, 1)
                     elif abs(scale - 0.01) < 1e-9:
                         val = round(val, 2)
+                    else:
+                        # 新增兜底：其他所有比例（包含 0.00001 等）最多只保留 6 位小数
+                        val = round(val, 6)
                 if 'offset' in field_info: val = val + field_info['offset']
                 if 'unit' in field_info: val = f"{val}{field_info['unit']}"
         return val
@@ -120,11 +141,13 @@ class ProtocolDecoder:
                 # 【支持 BITFIELD_U2 长度计算】
                 elif f_type in ['U2', 'I2', 'BITFIELD_U2']:
                     length = 2
-                elif f_type in ['U4', 'I4', 'BITFIELD_U4']:
+                elif f_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
                     length = 4
-                elif f_type in ['BCD', 'BYTES']:
+                # ====== 修改：将 HEX2DEC 加进长度判断中 ======
+                # ====== 修改：补充对变长字段的支持 ======
+                elif f_type in ['BCD', 'BYTES', 'HEX2DEC']:
                     length = field.get('length', 1)
-
+                # =====================================
                 if cursor + length > len(body_bytes):
                     result[f_name] = "<Truncated>"
                     break
@@ -148,6 +171,8 @@ class ProtocolDecoder:
                                 seg_val = round(seg_val, 1)
                             elif abs(scale - 0.01) < 1e-9:
                                 seg_val = round(seg_val, 2)
+                            else:
+                                seg_val = round(seg_val, 6)  # 新增兜底
                         if 'offset' in seg: seg_val = seg_val + seg['offset']
                         if 'mapping' in seg: seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
                         if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
@@ -177,8 +202,12 @@ class ProtocolDecoder:
                         # 内部循环体同样支持 U2
                         elif sf_type in ['U2', 'I2', 'BITFIELD_U2']:
                             slen = 2
-                        elif sf_type in ['U4', 'I4', 'BITFIELD_U4']:
+                        elif sf_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
                             slen = 4
+                        # ====== 新增1：循环体内支持 BCD, BYTES, HEX2DEC 变长字段 ======
+                        elif sf_type in ['BCD', 'BYTES', 'HEX2DEC']:
+                            slen = sub_f.get('length', 1)
+                        # ==========================================================
 
                         if cursor + slen > len(body_bytes): break
                         chunk = body_bytes[cursor: cursor + slen]
@@ -199,6 +228,8 @@ class ProtocolDecoder:
                                         seg_val = round(seg_val, 1)
                                     elif abs(scale - 0.01) < 1e-9:
                                         seg_val = round(seg_val, 2)
+                                    else:
+                                        seg_val = round(seg_val, 6)  # 新增兜底
                                 if 'offset' in seg: seg_val = seg_val + seg['offset']
                                 if 'mapping' in seg: seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
                                 if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
@@ -208,6 +239,31 @@ class ProtocolDecoder:
                         cursor += slen
                     if item: item_list.append(item)
                 result['point_list'] = item_list
+
+                # ====== 新增2：解析循环体之后的“尾部字段”（如云煤网 0x09 结尾的 IMEI） ======
+                if 'tail_fields' in msg_def:
+                    for tail_f in msg_def['tail_fields']:
+                        t_type = tail_f.get('type')
+
+                        # 动态计算尾部字段长度
+                        if t_type in ['U1', 'I1', 'BITFIELD_U1']:
+                            tlen = 1
+                        elif t_type in ['U2', 'I2', 'BITFIELD_U2']:
+                            tlen = 2
+                        elif t_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
+                            tlen = 4
+                        elif t_type in ['BCD', 'BYTES', 'HEX2DEC']:
+                            tlen = tail_f.get('length', 1)
+                        else:
+                            tlen = 1
+
+                        # 安全读取并追加到外层的 result 字典中
+                        if cursor + tlen <= len(body_bytes):
+                            chunk = body_bytes[cursor: cursor + tlen]
+                            val = self.read_field(t_type, chunk, tail_f)
+                            result[tail_f['name']] = val
+                            cursor += tlen
+                # =========================================================================
         except Exception as e:
             result['_error'] = f"解析异常: {str(e)}"
         return result
@@ -219,7 +275,14 @@ class StreamParser:
         self.buffer = bytearray()
         self.SYNC_HEADER = bytes.fromhex(self.decoder.config.get('sync_header', '4244'))
 
+        # ====== 新增：动态读取包头配置，兼容多种协议 ======
+        # 如果 JSON 里没配，默认使用旧协议的参数 (包头长8字节，长度字段在第6字节)
+        self.header_size = self.decoder.config.get('header_size', 8)
+        self.len_offset = self.decoder.config.get('len_offset', 6)
+        self.checksum_size = self.decoder.config.get('checksum_size', 2)
+
     def feed(self, raw_text):
+        import re, struct
         spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', raw_text)
         chunks = spaced_text.split()
         for chunk in chunks:
@@ -234,29 +297,45 @@ class StreamParser:
         while True:
             head_idx = self.buffer.find(self.SYNC_HEADER)
             if head_idx == -1:
-                keep = 1 if len(self.buffer) > 0 else 0
+                keep = len(self.SYNC_HEADER) - 1 if len(self.buffer) > 0 else 0
                 self.buffer = self.buffer[-keep:]
                 break
-            if head_idx > 0: self.buffer = self.buffer[head_idx:]
-            if len(self.buffer) < 8: break
+            if head_idx > 0:
+                self.buffer = self.buffer[head_idx:]
 
-            body_len = struct.unpack('>H', self.buffer[6:8])[0]
-            total_len = 8 + body_len + 2
+            # 动态判断包头是否完整
+            if len(self.buffer) < self.header_size:
+                break
 
-            if len(self.buffer) < total_len: break
+            # 动态获取数据包体的长度
+            body_len = struct.unpack('>H', self.buffer[self.len_offset: self.len_offset + 2])[0]
+            total_len = self.header_size + body_len + self.checksum_size
+
+            if len(self.buffer) < total_len:
+                break
 
             frame_bytes = self.buffer[:total_len]
             parsed_frame = self.process_frame(frame_bytes)
             frames.append(parsed_frame)
             self.buffer = self.buffer[total_len:]
+
         return frames
 
     def process_frame(self, data):
+        import struct
         msg_type = data[2]
         msg_type_hex = f"0x{msg_type:02X}"
-        seq = struct.unpack('>H', data[3:5])[0]
-        body = data[8:-2]
+
+        # 动态判断是否包含 seq (旧协议有2字节序号，新协议没有)
+        if self.header_size == 8:
+            seq = struct.unpack('>H', data[3:5])[0]
+        else:
+            seq = "N/A"  # 新协议占位
+
+        # 根据动态 header_size 截取真正的 body
+        body = data[self.header_size: -self.checksum_size]
         decoded_data = self.decoder.decode_body(msg_type_hex, body)
+
         return {"type": msg_type_hex, "seq": seq, "data": decoded_data}
 
 
@@ -385,12 +464,7 @@ class EcuMainWindow(QMainWindow):
 
         self.all_frames = []
         self.filtered_frames = []
-
-        try:
-            self.decoder = ProtocolDecoder('protocol.json')
-        except Exception as e:
-            QMessageBox.critical(self, "初始化错误", str(e))
-            sys.exit(1)
+        self.decoder = None  # 先置空，稍后由 UI 触发加载
 
         self.init_ui()
 
@@ -426,6 +500,15 @@ class EcuMainWindow(QMainWindow):
 
         # 1. 顶部控制栏
         control_layout = QHBoxLayout()
+
+        # ====== 新增：协议选择下拉框 ======
+        self.combo_protocol = QComboBox()
+        self.populate_protocols()  # 扫描本地 json 文件
+        self.combo_protocol.currentIndexChanged.connect(self.change_protocol)
+
+        control_layout.addWidget(QLabel("📜 协议格式:"))
+        control_layout.addWidget(self.combo_protocol)
+        # ==================================
 
         self.btn_load = QPushButton("📂 打开日志文件 (.txt)")
         self.btn_load.clicked.connect(self.load_file)
@@ -482,6 +565,45 @@ class EcuMainWindow(QMainWindow):
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
 
+    def populate_protocols(self):
+        """扫描当前目录下的所有 json 文件，并加载到下拉框中"""
+        # 您也可以在这里指定一个专门的文件夹，如 './protocols'
+        json_files = [f for f in os.listdir('.') if f.endswith('.json')]
+
+        if not json_files:
+            QMessageBox.warning(self, "警告", "当前目录下没有找到任何 .json 协议文件！")
+            return
+
+        for jf in json_files:
+            self.combo_protocol.addItem(jf, jf)  # 显示名称和内部数据都用文件名
+
+    def change_protocol(self):
+        """切换协议时的核心逻辑"""
+        protocol_file = self.combo_protocol.currentData()
+        if not protocol_file:
+            return
+
+        try:
+            # 1. 重新实例化底层的解码器
+            self.decoder = ProtocolDecoder(protocol_file)
+
+            # 2. 清除旧的快速解析器缓存 (关键！否则快速解析还会用旧的)
+            if hasattr(self, 'parser'):
+                del self.parser
+
+            # 3. 清空界面上已有的旧数据
+            self.all_frames.clear()
+            self.filtered_frames.clear()
+            self.table_model.update_data([])
+            self.tree_model.removeRows(0, self.tree_model.rowCount())
+            self.combo_filter.clear()
+            self.combo_filter.addItem("显示所有类型", "ALL")
+
+            self.lbl_status.setText(f"✅ 已切换协议为: {protocol_file}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "协议加载失败", f"无法加载 {protocol_file}，请检查 JSON 格式！\n{str(e)}")
+
     def on_quick_parse_clicked(self):
         import traceback
 
@@ -491,14 +613,13 @@ class EcuMainWindow(QMainWindow):
             if not raw_text:
                 return
 
-            # 2. 拿到解析器实例
-            parser = getattr(self, 'parser', None)
-            if parser is None:
-                # 如果当前没有加载过日志，实例化一个临时的解析器
-                parser = StreamParser(self.decoder)
+            # 2. 拿到或创建解析器实例
+            if not hasattr(self, 'parser'):
+                # 存入 self 中，这样切换协议时我们就能 del 掉它
+                self.parser = StreamParser(self.decoder)
 
-            # 3. 核心修复：直接调用 feed() 方法，它会自动处理字符串！
-            parsed_frames = parser.feed(raw_text)
+            # 3. 核心修复：直接调用 feed() 方法
+            parsed_frames = self.parser.feed(raw_text)
 
             if not parsed_frames:
                 QMessageBox.warning(self, "解析失败",
