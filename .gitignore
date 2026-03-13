@@ -43,3 +43,5 @@ Thumbs.db
 /喵走ECU原始数据解析软件/
 /generate_yunmei_json.py
 /protocol_yunmei.json
+/generate_miaozo_km_json.py
+/protocol_miaozou.json

@@ -72,14 +72,14 @@ class ProtocolDecoder:
             val = self.parse_bcd(chunk)
         elif f_type == 'BYTES':
             val = binascii.hexlify(chunk).decode('ascii')
+
         # ====== 新增：支持将任意长度的十六进制转换为十进制显示 ======
         elif f_type == 'HEX2DEC':
             hex_str = binascii.hexlify(chunk).decode('ascii')
             # 转换为十进制后，将其转为字符串格式，防止 UI 显示科学计数法
             val = str(int(hex_str, 16))
-        # ==========================================================
+
         # ====== 新增：UTC 绝对秒转北京时间字符串 ======
-            # ====== 新增：UTC 绝对秒转北京时间字符串 ======
         elif f_type == 'TIMESTAMP_BJ':
             import datetime as dt_mod  # 【核心修复】：使用别名导入，绝对不干扰全局的 struct 和 datetime！
             # 1. 先按 4 字节无符号整数解包出秒数
@@ -90,7 +90,21 @@ class ProtocolDecoder:
                 val = dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 val = str(seconds)  # 万一转换失败，兜底显示原始数字
-        # ============================================
+
+        # ====== 喵走协议专属：经纬度算法 ======
+        elif f_type == 'MZ_LATLNG':
+            raw_val = struct.unpack('>I', chunk)[0]
+            # 公式：Value = (度*60 + 分) * 30000 => Decimal = Value / 30000 / 60
+            val = round(raw_val / 1800000.0, 6)
+
+        # ====== 喵走协议专属：不定长 ASCII 字符串 ======
+        elif f_type == 'ASCII_STR':
+            try:
+                # 过滤掉末尾可能的空字符
+                val = chunk.decode('ascii', errors='ignore').strip('\x00')
+            except Exception:
+                val = str(chunk)
+
         # 【支持 BITFIELD_U2】
         elif f_type.startswith('BITFIELD_'):
             if f_type == 'BITFIELD_U4':
@@ -139,16 +153,19 @@ class ProtocolDecoder:
                 length = 1
                 if f_type in ['U1', 'BITFIELD_U1', 'I1']:
                     length = 1
-                # 【支持 BITFIELD_U2 长度计算】
                 elif f_type in ['U2', 'I2', 'BITFIELD_U2']:
                     length = 2
-                elif f_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
+                # ====== 修改：增加复合类型占 4 字节 ======
+                elif f_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
                     length = 4
-                # ====== 修改：将 HEX2DEC 加进长度判断中 ======
-                # ====== 修改：补充对变长字段的支持 ======
                 elif f_type in ['BCD', 'BYTES', 'HEX2DEC']:
                     length = field.get('length', 1)
-                # =====================================
+                # ====== 喵走协议专属：不定长字符长度推断 ======
+                elif f_type == 'ASCII_STR':
+                    length = field.get('length', -1)
+                    if length == -1:
+                        length = len(body_bytes) - cursor  # 占满剩余所有长度
+
                 if cursor + length > len(body_bytes):
                     result[f_name] = "<Truncated>"
                     break
@@ -200,15 +217,15 @@ class ProtocolDecoder:
                         slen = 1
                         if sf_type in ['U1', 'BITFIELD_U1', 'I1']:
                             slen = 1
-                        # 内部循环体同样支持 U2
                         elif sf_type in ['U2', 'I2', 'BITFIELD_U2']:
                             slen = 2
-                        elif sf_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
+                        elif sf_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
                             slen = 4
-                        # ====== 新增1：循环体内支持 BCD, BYTES, HEX2DEC 变长字段 ======
                         elif sf_type in ['BCD', 'BYTES', 'HEX2DEC']:
                             slen = sub_f.get('length', 1)
-                        # ==========================================================
+                        elif sf_type == 'ASCII_STR':
+                            slen = sub_f.get('length', -1)
+                            if slen == -1: slen = len(body_bytes) - cursor
 
                         if cursor + slen > len(body_bytes): break
                         chunk = body_bytes[cursor: cursor + slen]
@@ -241,30 +258,33 @@ class ProtocolDecoder:
                     if item: item_list.append(item)
                 result['point_list'] = item_list
 
-                # ====== 新增2：解析循环体之后的“尾部字段”（如云煤网 0x09 结尾的 IMEI） ======
-                if 'tail_fields' in msg_def:
-                    for tail_f in msg_def['tail_fields']:
-                        t_type = tail_f.get('type')
+            # ====== 尾部字段（如云煤网 0x09 结尾的 IMEI） ======
+            if 'tail_fields' in msg_def:
+                for tail_f in msg_def['tail_fields']:
+                    t_type = tail_f.get('type')
 
-                        # 动态计算尾部字段长度
-                        if t_type in ['U1', 'I1', 'BITFIELD_U1']:
-                            tlen = 1
-                        elif t_type in ['U2', 'I2', 'BITFIELD_U2']:
-                            tlen = 2
-                        elif t_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ']:
-                            tlen = 4
-                        elif t_type in ['BCD', 'BYTES', 'HEX2DEC']:
-                            tlen = tail_f.get('length', 1)
-                        else:
-                            tlen = 1
+                    # 动态计算尾部字段长度
+                    if t_type in ['U1', 'I1', 'BITFIELD_U1']:
+                        tlen = 1
+                    elif t_type in ['U2', 'I2', 'BITFIELD_U2']:
+                        tlen = 2
+                    elif t_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
+                        tlen = 4
+                    elif t_type in ['BCD', 'BYTES', 'HEX2DEC']:
+                        tlen = tail_f.get('length', 1)
+                    elif t_type == 'ASCII_STR':
+                        tlen = tail_f.get('length', -1)
+                        if tlen == -1: tlen = len(body_bytes) - cursor
+                    else:
+                        tlen = 1
 
-                        # 安全读取并追加到外层的 result 字典中
-                        if cursor + tlen <= len(body_bytes):
-                            chunk = body_bytes[cursor: cursor + tlen]
-                            val = self.read_field(t_type, chunk, tail_f)
-                            result[tail_f['name']] = val
-                            cursor += tlen
-                # =========================================================================
+                    # 安全读取并追加到外层的 result 字典中
+                    if cursor + tlen <= len(body_bytes):
+                        chunk = body_bytes[cursor: cursor + tlen]
+                        val = self.read_field(t_type, chunk, tail_f)
+                        result[tail_f['name']] = val
+                        cursor += tlen
+            # =========================================================================
         except Exception as e:
             result['_error'] = f"解析异常: {str(e)}"
         return result
@@ -276,18 +296,26 @@ class StreamParser:
         self.buffer = bytearray()
         self.SYNC_HEADER = bytes.fromhex(self.decoder.config.get('sync_header', '4244'))
 
-        # ====== 新增：动态读取包头配置，兼容多种协议 ======
-        # 如果 JSON 里没配，默认使用旧协议的参数 (包头长8字节，长度字段在第6字节)
+        # ====== 动态读取包头配置，兼容多种协议 ======
         self.header_size = self.decoder.config.get('header_size', 8)
         self.len_offset = self.decoder.config.get('len_offset', 6)
         self.checksum_size = self.decoder.config.get('checksum_size', 2)
+
+        # 兼容喵走：长度包含了整个包
+        self.len_includes_all = self.decoder.config.get('len_includes_all', False)
+        # 动态获取命令码偏移量 (喵走 AAAA 为 5，其他默认为 2)
+        default_msg_offset = 5 if self.SYNC_HEADER.hex().upper() == 'AAAA' else 2
+        self.msg_type_offset = self.decoder.config.get('msg_type_offset', default_msg_offset)
 
     def feed(self, raw_text):
         import re, struct
         spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', raw_text)
         chunks = spaced_text.split()
+        sync_hex = self.SYNC_HEADER.hex().lower()
+
         for chunk in chunks:
-            if len(chunk) >= 12 or '4244' in chunk.lower():
+            # 兼容动态配置的包头搜索
+            if len(chunk) >= 12 or sync_hex in chunk.lower():
                 if len(chunk) % 2 != 0: chunk = chunk[:-1]
                 try:
                     self.buffer.extend(bytes.fromhex(chunk))
@@ -310,31 +338,48 @@ class StreamParser:
 
             # 动态获取数据包体的长度
             body_len = struct.unpack('>H', self.buffer[self.len_offset: self.len_offset + 2])[0]
-            total_len = self.header_size + body_len + self.checksum_size
+
+            # 兼容不同协议对“长度”的定义
+            if self.len_includes_all:
+                total_len = body_len
+            else:
+                total_len = self.header_size + body_len + self.checksum_size
 
             if len(self.buffer) < total_len:
                 break
 
             frame_bytes = self.buffer[:total_len]
             parsed_frame = self.process_frame(frame_bytes)
-            frames.append(parsed_frame)
+            if parsed_frame:
+                frames.append(parsed_frame)
             self.buffer = self.buffer[total_len:]
 
         return frames
 
     def process_frame(self, data):
         import struct
-        msg_type = data[2]
+
+        # 防止越界
+        if self.msg_type_offset >= len(data):
+            return None
+
+        msg_type = data[self.msg_type_offset]
         msg_type_hex = f"0x{msg_type:02X}"
 
-        # 动态判断是否包含 seq (旧协议有2字节序号，新协议没有)
+        # 动态判断是否包含 seq (旧协议有2字节序号，喵走协议有1字节，其他占位)
         if self.header_size == 8:
             seq = struct.unpack('>H', data[3:5])[0]
+        elif self.header_size == 10:
+            seq = data[6]  # 喵走协议流水号
         else:
-            seq = "N/A"  # 新协议占位
+            seq = "N/A"
 
-        # 根据动态 header_size 截取真正的 body
-        body = data[self.header_size: -self.checksum_size]
+            # 根据动态 header_size 和 checksum_size 截取真正的 body
+        if self.checksum_size > 0:
+            body = data[self.header_size: -self.checksum_size]
+        else:
+            body = data[self.header_size:]
+
         decoded_data = self.decoder.decode_body(msg_type_hex, body)
 
         return {"type": msg_type_hex, "seq": seq, "data": decoded_data}
@@ -417,22 +462,17 @@ class FrameTableModel(QAbstractTableModel):
                 # 生成摘要：提取告警、电压、电量等直观信息
                 summary = []
 
-                # 【新增逻辑】：智能提取并显示触发的告警内容
                 if 'alarm_bits' in f_data:
                     active_alarms = []
-                    # 遍历所有告警位，把值为 1 (触发) 的告警名字提取出来
                     for alarm_name, is_active in f_data['alarm_bits'].items():
                         if is_active == 1:
                             active_alarms.append(alarm_name)
-
                     if active_alarms:
-                        # 用 🚨 图标标出，非常醒目
                         summary.append(f"🚨告警: {'/'.join(active_alarms)}")
 
                 if 'voltage' in f_data:
                     summary.append(f"V:{f_data['voltage']}")
 
-                # 计算总位置点数：基础点(如果有) + point_list里面的差分点数
                 lat_val = f_data.get('lat', f_data.get('pt1_lat'))
                 total_pts = 0
                 if lat_val is not None:
@@ -440,7 +480,6 @@ class FrameTableModel(QAbstractTableModel):
                 if 'point_list' in f_data:
                     total_pts += len(f_data['point_list'])
 
-                # 针对 0x52 专门显示点数
                 if frame['type'] == '0x52':
                     summary.append(f"共包含 {total_pts} 个定位点")
 
@@ -450,7 +489,6 @@ class FrameTableModel(QAbstractTableModel):
                 return ", ".join(summary) if summary else "无摘要"
 
     def get_msg_name(self, hex_type):
-        # 依赖外部注入的名字，这里简写处理
         return "详情见下"
 
     def get_raw_data(self, row):
@@ -460,7 +498,7 @@ class FrameTableModel(QAbstractTableModel):
 class EcuMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECU 协议解析器 (GUI版)")
+        self.setWindowTitle("多协议解析工具 (GUI版)")
         self.resize(1000, 700)
 
         self.all_frames = []
@@ -478,38 +516,31 @@ class EcuMainWindow(QMainWindow):
         self.quick_parse_layout = QHBoxLayout()
 
         self.quick_parse_input = QLineEdit()
-        self.quick_parse_input.setPlaceholderText("在此粘贴单条或多条原始 Hex 报文 (例如: 42 44 51...)")
-        self.quick_parse_input.setClearButtonEnabled(True)  # 右侧自带一个小叉叉用来一键清空
+        self.quick_parse_input.setPlaceholderText("在此粘贴单条或多条原始 Hex 报文 (例如: 42 44 51... 或 AAAA 01...)")
+        self.quick_parse_input.setClearButtonEnabled(True)
 
         self.quick_parse_btn = QPushButton("🚀 快速解析")
-        self.quick_parse_btn.setFixedWidth(100)  # 固定按钮宽度，让它看起来更精致
+        self.quick_parse_btn.setFixedWidth(100)
 
-        # 将输入框和按钮加入水平布局
         self.quick_parse_layout.addWidget(self.quick_parse_input)
         self.quick_parse_layout.addWidget(self.quick_parse_btn)
 
-        # 【注意】请将下面这行代码里的 main_layout 替换为您代码中实际的总垂直布局变量名！
-        # 例如您原本可能是 self.main_layout.addWidget(self.table_view)
-        # 那么就在那行前面加上：
         main_layout.addLayout(self.quick_parse_layout)
 
-        # 绑定按钮点击事件
+        # 绑定事件
         self.quick_parse_btn.clicked.connect(self.on_quick_parse_clicked)
-        # 绑定回车键事件（在输入框里敲回车也能直接解析）
         self.quick_parse_input.returnPressed.connect(self.on_quick_parse_clicked)
         # ---------------------------
 
         # 1. 顶部控制栏
         control_layout = QHBoxLayout()
 
-        # ====== 新增：协议选择下拉框 ======
         self.combo_protocol = QComboBox()
         self.populate_protocols()  # 扫描本地 json 文件
         self.combo_protocol.currentIndexChanged.connect(self.change_protocol)
 
         control_layout.addWidget(QLabel("📜 协议格式:"))
         control_layout.addWidget(self.combo_protocol)
-        # ==================================
 
         self.btn_load = QPushButton("📂 打开日志文件 (.txt)")
         self.btn_load.clicked.connect(self.load_file)
@@ -544,8 +575,8 @@ class EcuMainWindow(QMainWindow):
         # 上半部分：数据表格
         self.table_view = QTableView()
         self.table_model = FrameTableModel()
-        # 猴子补丁：注入获取名字的方法
-        self.table_model.get_msg_name = lambda t: self.decoder.msgs.get(t, {}).get('name', '未知')
+        self.table_model.get_msg_name = lambda t: self.decoder.msgs.get(t, {}).get('name',
+                                                                                   '未知') if self.decoder else '未知'
         self.table_view.setModel(self.table_model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -565,12 +596,11 @@ class EcuMainWindow(QMainWindow):
         # 设置初始上下比例 6:4
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
-        # ✅ 【修复】：在所有 UI 控件都初始化完毕后，再触发一次协议加载
+
+        # ✅ 在所有 UI 控件都初始化完毕后，再触发一次协议加载
         self.change_protocol()
 
     def populate_protocols(self):
-        """扫描当前目录下的所有 json 文件，并加载到下拉框中"""
-        # 您也可以在这里指定一个专门的文件夹，如 './protocols'
         json_files = [f for f in os.listdir('.') if f.endswith('.json')]
 
         if not json_files:
@@ -578,29 +608,27 @@ class EcuMainWindow(QMainWindow):
             return
 
         for jf in json_files:
-            self.combo_protocol.addItem(jf, jf)  # 显示名称和内部数据都用文件名
+            self.combo_protocol.addItem(jf, jf)
 
     def change_protocol(self):
-        """切换协议时的核心逻辑"""
         protocol_file = self.combo_protocol.currentData()
         if not protocol_file:
             return
 
         try:
-            # 1. 重新实例化底层的解码器
             self.decoder = ProtocolDecoder(protocol_file)
 
-            # 2. 清除旧的快速解析器缓存 (关键！否则快速解析还会用旧的)
             if hasattr(self, 'parser'):
                 del self.parser
 
-            # 3. 清空界面上已有的旧数据
             self.all_frames.clear()
             self.filtered_frames.clear()
             self.table_model.update_data([])
             self.tree_model.removeRows(0, self.tree_model.rowCount())
+            self.combo_filter.blockSignals(True)
             self.combo_filter.clear()
             self.combo_filter.addItem("显示所有类型", "ALL")
+            self.combo_filter.blockSignals(False)
 
             self.lbl_status.setText(f"✅ 已切换协议为: {protocol_file}")
 
@@ -611,54 +639,68 @@ class EcuMainWindow(QMainWindow):
         import traceback
 
         try:
-            # 1. 获取输入框的原始文本
             raw_text = self.quick_parse_input.text().strip()
             if not raw_text:
                 return
 
-            # ====== 【新增的防御代码】：检查 decoder 是否存在 ======
             if self.decoder is None:
                 QMessageBox.warning(self, "警告", "底层协议配置未加载！\n请检查左上角是否已选择 .json 协议文件。")
                 return
-            # ========================================================
 
-            # 2. 拿到或创建解析器实例
-            if not hasattr(self, 'parser'):
-                # 存入 self 中，这样切换协议时我们就能 del 掉它
+            if not hasattr(self, 'parser') or getattr(self, 'parser') is None:
                 self.parser = StreamParser(self.decoder)
 
-            # 3. 核心修复：直接调用 feed() 方法
             parsed_frames = self.parser.feed(raw_text)
 
             if not parsed_frames:
                 QMessageBox.warning(self, "解析失败",
-                                    "未能识别出有效的协议帧。\n请检查数据是否包含完整的 4244 包头及正确的长度。")
+                                    "未能识别出有效的协议帧。\n请检查数据是否包含正确的包头及长度配置。")
                 return
 
-            # 4. 更新表格模型
-            self.table_model.layoutAboutToBeChanged.emit()
-
+            # ====== 修复：将数据添加到内存，并同步更新全部过滤逻辑 ======
             for frame in parsed_frames:
-                frame['seq'] = "手动"  # 给序列号打个标记
-                self.table_model._data.append(frame)
+                msg_def = self.decoder.msgs.get(frame['type'], {})
+                frame['name'] = msg_def.get('name', '未知消息')
+                frame['seq'] = "手动"  # 标记为手动快速解析
+                self.all_frames.append(frame)
 
-            self.table_model.layoutChanged.emit()
+            # 更新下拉框选项
+            current_filter = self.combo_filter.currentData()
+            self.combo_filter.blockSignals(True)
+            self.combo_filter.clear()
+            self.combo_filter.addItem("显示所有类型", "ALL")
+            types = set(f['type'] for f in self.all_frames)
+            for t in sorted(types):
+                name = self.decoder.msgs.get(t, {}).get('name', 'Unknown')
+                self.combo_filter.addItem(f"{t} - {name}", t)
+            idx = self.combo_filter.findData(current_filter)
+            if idx >= 0:
+                self.combo_filter.setCurrentIndex(idx)
+            self.combo_filter.blockSignals(False)
 
-            # 5. 滚动到底部并选中最新行
-            last_row_index = len(self.table_model._data) - 1
-            model_index = self.table_model.index(last_row_index, 0)
-            self.table_view.scrollToBottom()
-            self.table_view.setCurrentIndex(model_index)
+            # 执行过滤并刷新表格模型
+            self.apply_filter()
 
-            # 6. 联动下方的树状图展示详情
-            if hasattr(self, 'on_table_clicked'):
-                self.on_table_clicked(model_index)
+            # 滚动到底部并选中最新行
+            last_row_index = len(self.filtered_frames) - 1
+            if last_row_index >= 0:
+                model_index = self.table_model.index(last_row_index, 0)
+                self.table_view.scrollToBottom()
+                self.table_view.setCurrentIndex(model_index)
+                self.on_row_clicked(model_index)
+
+            self.lbl_status.setText("⚡ 快速解析成功！已追加至列表。")
+            self.quick_parse_input.clear()
 
         except Exception as e:
             error_msg = traceback.format_exc()
             QMessageBox.critical(self, "程序崩溃拦截", f"底层解析抛出异常：\n\n{error_msg}")
 
     def load_file(self):
+        if self.decoder is None:
+            QMessageBox.warning(self, "警告", "底层协议配置未加载！")
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(self, "选择日志文件", "", "Text Files (*.txt *.log);;All Files (*)")
         if not file_path:
             return
@@ -668,15 +710,16 @@ class EcuMainWindow(QMainWindow):
         self.table_model.update_data([])
         self.tree_model.removeRows(0, self.tree_model.rowCount())
 
+        self.combo_filter.blockSignals(True)
         self.combo_filter.clear()
         self.combo_filter.addItem("显示所有类型", "ALL")
+        self.combo_filter.blockSignals(False)
 
         self.btn_load.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(0)  # 跑马灯模式
         self.lbl_status.setText("正在极速解析中...")
 
-        # 启动后台解析线程
         self.worker = ParseWorker(file_path, self.decoder)
         self.worker.batch_ready.connect(self.on_batch_ready)
         self.worker.progress.connect(self.on_progress)
@@ -696,13 +739,19 @@ class EcuMainWindow(QMainWindow):
         self.lbl_status.setText(f"解析完成！共 {total_count} 条有效帧。")
         self.btn_export.setEnabled(True)
 
+        # 追加 name
+        for frame in self.all_frames:
+            msg_def = self.decoder.msgs.get(frame['type'], {})
+            frame['name'] = msg_def.get('name', '未知消息')
+
         # 更新下拉框选项
         types = set(f['type'] for f in self.all_frames)
+        self.combo_filter.blockSignals(True)
         for t in sorted(types):
             name = self.decoder.msgs.get(t, {}).get('name', 'Unknown')
             self.combo_filter.addItem(f"{t} - {name}", t)
+        self.combo_filter.blockSignals(False)
 
-        # 初始显示全部
         self.apply_filter()
 
     def on_parse_error(self, err_msg):
@@ -714,8 +763,8 @@ class EcuMainWindow(QMainWindow):
         if not self.all_frames: return
         target_type = self.combo_filter.currentData()
 
-        if target_type == "ALL":
-            self.filtered_frames = self.all_frames
+        if target_type == "ALL" or not target_type:
+            self.filtered_frames = self.all_frames[:]
         else:
             self.filtered_frames = [f for f in self.all_frames if f['type'] == target_type]
 
@@ -724,64 +773,51 @@ class EcuMainWindow(QMainWindow):
         self.tree_model.removeRows(0, self.tree_model.rowCount())
 
     def on_row_clicked(self, index):
-        """点击表格某一行，在下方树中显示详细解析结果"""
+        if not index.isValid(): return
         frame = self.table_model.get_raw_data(index.row())
 
         self.tree_model.removeRows(0, self.tree_model.rowCount())
         root_node = self.tree_model.invisibleRootItem()
 
-        # 构建头部信息
-        info = QStandardItem(f"[基本信息] Seq: {frame['seq']}, Type: {frame['type']}")
+        info = QStandardItem(f"[基本信息] Seq: {frame.get('seq', '')}, Type: {frame['type']}")
         info.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
         root_node.appendRow(info)
 
-        # 递归展示 JSON 字典
         self._populate_tree(root_node, frame['data'])
         self.tree_view.expandAll()
 
     def _populate_tree(self, parent_item, data_node):
         if isinstance(data_node, dict):
-            # 获取当前字典的所有键
             keys = list(data_node.keys())
 
-            # ====== 新增：强制显示顺序干预逻辑 ======
-            # 1. 强制把 'time' (时间) 移到绝对的第一行
             if 'time' in keys:
                 keys.remove('time')
                 keys.insert(0, 'time')
 
-            # 2. 针对 0x52，把 RTK 状态及动静属性强制移到 'pkg_count' 之前
             if 'pkg_count' in keys:
                 rtk_fields = ["Bit00_03_RTK状态", "Bit04_超速指示", "Bit05_静态位置"]
-
-                # 先把这些 RTK 字段从当前顺序中抽出来
                 extracted = []
                 for f in rtk_fields:
                     if f in keys:
                         keys.remove(f)
                         extracted.append(f)
-
-                # 找到 pkg_count 的位置，把抽出来的字段插到它前面
                 if extracted:
                     pkg_idx = keys.index('pkg_count')
-                    for f in reversed(extracted):  # 反向插入以保持它们之间的原有顺序
+                    for f in reversed(extracted):
                         keys.insert(pkg_idx, f)
-            # ========================================
 
-            # 按照调整后的顺序添加到界面树状图中
             for key in keys:
                 val = data_node[key]
                 if isinstance(val, (dict, list)):
                     node = QStandardItem(str(key))
                     node.setForeground(Qt.GlobalColor.darkBlue)
                     parent_item.appendRow(node)
-                    self._populate_tree(node, val)  # 递归处理
+                    self._populate_tree(node, val)
                 else:
                     item = QStandardItem(f"{key}: {val}")
                     parent_item.appendRow(item)
 
         elif isinstance(data_node, list):
-            # 列表逻辑保持不变
             for i, item in enumerate(data_node):
                 if isinstance(item, (dict, list)):
                     node = QStandardItem(f"[{i}]")
@@ -821,14 +857,13 @@ class EcuMainWindow(QMainWindow):
                 writer.writeheader()
                 writer.writerows(processed_rows)
             QMessageBox.information(self, "导出成功", f"成功导出 {len(processed_rows)} 条数据！")
-            os.system(f"start {filename}")  # 仅限 Windows
+            os.system(f"start {filename}")
         except Exception as e:
             QMessageBox.critical(self, "导出失败", str(e))
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    # 强制设置现代化风格
     app.setStyle("Fusion")
     window = EcuMainWindow()
     window.show()
