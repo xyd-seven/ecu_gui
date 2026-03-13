@@ -314,13 +314,15 @@ class StreamParser:
         sync_hex = self.SYNC_HEADER.hex().lower()
 
         for chunk in chunks:
-            # 兼容动态配置的包头搜索
-            if len(chunk) >= 12 or sync_hex in chunk.lower():
-                if len(chunk) % 2 != 0: chunk = chunk[:-1]
-                try:
-                    self.buffer.extend(bytes.fromhex(chunk))
-                except:
-                    pass
+            # ====== 【核心修复】：移除严苛的长度限制，全面兼容带空格的 Hex 报文 ======
+            if len(chunk) % 2 != 0:
+                chunk = chunk[:-1]  # 保护机制：自动丢弃奇数位残片，绝不让底层半字节错位
+            if not chunk:
+                continue
+            try:
+                self.buffer.extend(bytes.fromhex(chunk))
+            except:
+                pass
 
         frames = []
         while True:
