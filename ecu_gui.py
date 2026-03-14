@@ -6,9 +6,9 @@ import re
 import binascii
 import csv
 
-from datetime import datetime
+# 🚀 优化 2：统一在顶部引入所有需要的时间库，避免函数内重复 import 造成性能损耗
+from datetime import datetime, timezone, timedelta
 
-# 导入 PyQt6 核心组件
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
                              QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
@@ -33,7 +33,8 @@ class ProtocolDecoder:
     def format_time(self, timestamp):
         try:
             if 0 < timestamp < 4102444800:
-                dt = datetime.utcfromtimestamp(timestamp)
+                # 🚀 优化 2：使用现代 Python 推荐的标准时区转换方法，代替废弃的 utcfromtimestamp
+                dt = datetime.fromtimestamp(timestamp, timezone.utc)
                 return dt.strftime('%Y-%m-%d %H:%M:%S')
             return str(timestamp)
         except:
@@ -52,6 +53,39 @@ class ProtocolDecoder:
             except:
                 continue
         return result
+
+    # 🚀 优化 1 核心：抽离统一的值处理函数（缩放、偏移、映射、单位追加）
+    def _process_value(self, val, field_info):
+        if isinstance(val, (int, float)):
+            if 'scale' in field_info:
+                val = val * field_info['scale']
+                scale = field_info['scale']
+                # 浮点数精度修正
+                if abs(scale - 0.000001) < 1e-9:
+                    val = round(val, 6)
+                elif abs(scale - 0.1) < 1e-9:
+                    val = round(val, 1)
+                elif abs(scale - 0.01) < 1e-9:
+                    val = round(val, 2)
+                else:
+                    val = round(val, 6)
+
+            if 'offset' in field_info:
+                val = val + field_info['offset']
+
+            # 数字类型的字典映射
+            if 'mapping' in field_info:
+                val = field_info['mapping'].get(str(int(val)), val)
+
+        # 字符串类型的字典映射 (兼容 "crc error" 等)
+        elif isinstance(val, str) and 'mapping' in field_info:
+            val = field_info['mapping'].get(val.strip(), val)
+
+        # 追加单位
+        if 'unit' in field_info and str(val).strip() != "":
+            val = f"{val}{field_info['unit']}"
+
+        return val
 
     def read_field(self, f_type, chunk, field_info):
         val = None
@@ -72,59 +106,41 @@ class ProtocolDecoder:
         elif f_type == 'BYTES':
             val = binascii.hexlify(chunk).decode('ascii')
         elif f_type == 'HEX2DEC':
-            hex_str = binascii.hexlify(chunk).decode('ascii')
-            val = str(int(hex_str, 16))
+            val = str(int(binascii.hexlify(chunk).decode('ascii'), 16))
 
         elif f_type == 'TIMESTAMP_BJ':
-            import datetime as dt_mod
             seconds = struct.unpack('>I', chunk)[0]
             try:
-                dt = dt_mod.datetime.fromtimestamp(seconds, dt_mod.timezone.utc) + dt_mod.timedelta(hours=8)
+                # 🚀 优化 2：直接使用顶部导入的 timezone 和 timedelta，更快速
+                dt = datetime.fromtimestamp(seconds, timezone.utc) + timedelta(hours=8)
                 val = dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 val = str(seconds)
 
         elif f_type == 'MZ_LATLNG':
-            raw_val = struct.unpack('>I', chunk)[0]
-            val = round(raw_val / 1800000.0, 6)
+            val = round(struct.unpack('>I', chunk)[0] / 1800000.0, 6)
 
         elif f_type == 'ASCII_STR':
             try:
                 val = chunk.decode('ascii', errors='ignore').strip('\x00')
-            except Exception:
+            except:
                 val = str(chunk)
 
         elif f_type.startswith('BITFIELD_'):
-            if f_type == 'BITFIELD_U4':
-                fmt, width = '>I', 32
-            elif f_type == 'BITFIELD_U2':
-                fmt, width = '>H', 16
-            else:
-                fmt, width = '>B', 8
+            fmt, width = {
+                'BITFIELD_U4': ('>I', 32),
+                'BITFIELD_U2': ('>H', 16)
+            }.get(f_type, ('>B', 8))
 
             int_val = struct.unpack(fmt, chunk)[0]
-            mapping = field_info.get('mapping')
-            if mapping is None and 'mapping_ref' in field_info:
-                mapping = self.common_mappings.get(field_info['mapping_ref'], {})
-            val = self.parse_bitfield(int_val, mapping or {}, width)
+            mapping = field_info.get('mapping', self.common_mappings.get(field_info.get('mapping_ref'), {}))
+            val = self.parse_bitfield(int_val, mapping, width)
 
+        # 时间字段特殊格式化
         if isinstance(val, (int, float)) and 'BITFIELD' not in f_type and 'segments' not in field_info:
             if 'time' in field_info.get('name', '').lower() and field_info.get('unit') is None:
                 val = self.format_time(val)
-            else:
-                if 'scale' in field_info:
-                    val = val * field_info['scale']
-                    scale = field_info['scale']
-                    if abs(scale - 0.000001) < 1e-9:
-                        val = round(val, 6)
-                    elif abs(scale - 0.1) < 1e-9:
-                        val = round(val, 1)
-                    elif abs(scale - 0.01) < 1e-9:
-                        val = round(val, 2)
-                    else:
-                        val = round(val, 6)
-                if 'offset' in field_info: val = val + field_info['offset']
-                if 'unit' in field_info: val = f"{val}{field_info['unit']}"
+
         return val
 
     def decode_body(self, msg_type_hex, body_bytes):
@@ -134,167 +150,73 @@ class ProtocolDecoder:
         result = {}
         cursor = 0
         try:
-            for field in msg_def['fields']:
-                f_name = field['name']
-                f_type = field['type']
-                length = 1
-                if f_type in ['U1', 'BITFIELD_U1', 'I1']:
-                    length = 1
-                elif f_type in ['U2', 'I2', 'BITFIELD_U2']:
-                    length = 2
-                elif f_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
-                    length = 4
-                elif f_type in ['BCD', 'BYTES', 'HEX2DEC']:
-                    length = field.get('length', 1)
-                    if length == -1: length = len(body_bytes) - cursor  # 支持剩余全量截取
-                elif f_type == 'ASCII_STR':
-                    length = field.get('length', -1)
-                    if length == -1: length = len(body_bytes) - cursor
+            # 内部闭包函数：统一处理块长度计算与数据截取
+            def get_chunk(f_def, current_cursor):
+                ft = f_def['type']
+                length = {
+                    'U1': 1, 'BITFIELD_U1': 1, 'I1': 1,
+                    'U2': 2, 'I2': 2, 'BITFIELD_U2': 2,
+                    'U4': 4, 'I4': 4, 'BITFIELD_U4': 4, 'TIMESTAMP_BJ': 4, 'MZ_LATLNG': 4
+                }.get(ft, f_def.get('length', 1))
 
-                if cursor + length > len(body_bytes):
-                    result[f_name] = "<Truncated>"
+                if length == -1:
+                    length = len(body_bytes) - current_cursor
+                if current_cursor + length > len(body_bytes):
+                    return None, length
+                return body_bytes[current_cursor: current_cursor + length], length
+
+            # 1. 解析主干字段
+            for field in msg_def['fields']:
+                chunk, length = get_chunk(field, cursor)
+                if chunk is None:
+                    result[field['name']] = "<Truncated>"
                     break
 
-                chunk = body_bytes[cursor: cursor + length]
-                val = self.read_field(f_type, chunk, field)
+                val = self.read_field(field['type'], chunk, field)
 
+                # 位域拆分 (Segments) 逻辑
                 if 'segments' in field and isinstance(val, int):
                     for seg in field['segments']:
-                        seg_name = seg['name']
-                        mask = seg.get('mask', 0xFF)
-                        shift = seg.get('shift', 0)
-                        seg_val = (val & mask) >> shift
-                        if 'scale' in seg:
-                            seg_val = seg_val * seg['scale']
-                            scale = seg['scale']
-                            if abs(scale - 0.000001) < 1e-9:
-                                seg_val = round(seg_val, 6)
-                            elif abs(scale - 0.1) < 1e-9:
-                                seg_val = round(seg_val, 1)
-                            elif abs(scale - 0.01) < 1e-9:
-                                seg_val = round(seg_val, 2)
-                            else:
-                                seg_val = round(seg_val, 6)
-                        if 'offset' in seg: seg_val = seg_val + seg['offset']
-                        if 'mapping' in seg:
-                            seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
-                        if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
-                        result[seg_name] = seg_val
+                        seg_val = (val & seg.get('mask', 0xFF)) >> seg.get('shift', 0)
+                        # 🚀 优化 1：复用提取的值处理逻辑
+                        result[seg['name']] = self._process_value(seg_val, seg)
                 else:
-                    # =======================================================
-                    # 🚀 修复核心：安全地处理 mapping，防止字典或字符串转换报错
-                    # =======================================================
-                    if 'mapping' in field:
-                        if isinstance(val, (int, float)):
-                            val = field['mapping'].get(str(int(val)), val)
-                        elif isinstance(val, str):
-                            # 对字符串去空后匹配（兼容类似 "crc error" 的翻译）
-                            val = field['mapping'].get(val.strip(), val)
-                    result[f_name] = val
+                    # 🚀 优化 1：主字段复用值处理逻辑
+                    result[field['name']] = self._process_value(val, field)
                 cursor += length
 
-            # 处理 is_loop 循环体数据
+            # 2. 解析循环体结构 (is_loop)
             if msg_def.get('is_loop') and 'sub_struct' in msg_def:
-                count_field = msg_def.get('loop_count_field')
-                loop_count = 0
-                if count_field and count_field in result:
-                    try:
-                        loop_count = int(result[count_field])
-                    except:
-                        pass
+                loop_count = int(result.get(msg_def.get('loop_count_field'), 0))
                 item_list = []
-                sub_fields = msg_def['sub_struct']
-                for i in range(loop_count):
+                for _ in range(loop_count):
                     item = {}
-                    for sub_f in sub_fields:
-                        sf_name = sub_f['name']
-                        sf_type = sub_f['type']
-                        slen = 1
-                        if sf_type in ['U1', 'BITFIELD_U1', 'I1']:
-                            slen = 1
-                        elif sf_type in ['U2', 'I2', 'BITFIELD_U2']:
-                            slen = 2
-                        elif sf_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
-                            slen = 4
-                        elif sf_type in ['BCD', 'BYTES', 'HEX2DEC']:
-                            slen = sub_f.get('length', 1)
-                            if slen == -1: slen = len(body_bytes) - cursor
-                        elif sf_type == 'ASCII_STR':
-                            slen = sub_f.get('length', -1)
-                            if slen == -1: slen = len(body_bytes) - cursor
+                    for sub_f in msg_def['sub_struct']:
+                        chunk, slen = get_chunk(sub_f, cursor)
+                        if chunk is None: break
 
-                        if cursor + slen > len(body_bytes): break
-                        chunk = body_bytes[cursor: cursor + slen]
-                        val = self.read_field(sf_type, chunk, sub_f)
-
+                        val = self.read_field(sub_f['type'], chunk, sub_f)
                         if 'segments' in sub_f and isinstance(val, int):
                             for seg in sub_f['segments']:
-                                seg_name = seg['name']
-                                mask = seg.get('mask', 0xFF)
-                                shift = seg.get('shift', 0)
-                                seg_val = (val & mask) >> shift
-                                if 'scale' in seg:
-                                    seg_val = seg_val * seg['scale']
-                                    scale = seg['scale']
-                                    if abs(scale - 0.000001) < 1e-9:
-                                        seg_val = round(seg_val, 6)
-                                    elif abs(scale - 0.1) < 1e-9:
-                                        seg_val = round(seg_val, 1)
-                                    elif abs(scale - 0.01) < 1e-9:
-                                        seg_val = round(seg_val, 2)
-                                    else:
-                                        seg_val = round(seg_val, 6)
-                                if 'offset' in seg: seg_val = seg_val + seg['offset']
-                                if 'mapping' in seg:
-                                    seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
-                                if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
-                                item[seg_name] = seg_val
+                                seg_val = (val & seg.get('mask', 0xFF)) >> seg.get('shift', 0)
+                                item[seg['name']] = self._process_value(seg_val, seg)
                         else:
-                            # 循环体中的安全 mapping
-                            if 'mapping' in sub_f:
-                                if isinstance(val, (int, float)):
-                                    val = sub_f['mapping'].get(str(int(val)), val)
-                                elif isinstance(val, str):
-                                    val = sub_f['mapping'].get(val.strip(), val)
-                            item[sf_name] = val
+                            item[sub_f['name']] = self._process_value(val, sub_f)
                         cursor += slen
                     if item: item_list.append(item)
                 result['point_list'] = item_list
 
-            # 处理尾部附加字段
+            # 3. 解析尾部字段 (tail_fields)
             if 'tail_fields' in msg_def:
                 for tail_f in msg_def['tail_fields']:
-                    t_type = tail_f.get('type')
-                    if t_type in ['U1', 'I1', 'BITFIELD_U1']:
-                        tlen = 1
-                    elif t_type in ['U2', 'I2', 'BITFIELD_U2']:
-                        tlen = 2
-                    elif t_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
-                        tlen = 4
-                    elif t_type in ['BCD', 'BYTES', 'HEX2DEC']:
-                        tlen = tail_f.get('length', 1)
-                        if tlen == -1: tlen = len(body_bytes) - cursor
-                    elif t_type == 'ASCII_STR':
-                        tlen = tail_f.get('length', -1)
-                        if tlen == -1: tlen = len(body_bytes) - cursor
-                    else:
-                        tlen = 1
-
-                    if cursor + tlen <= len(body_bytes):
-                        chunk = body_bytes[cursor: cursor + tlen]
-                        val = self.read_field(t_type, chunk, tail_f)
-
-                        # 尾部字段的安全 mapping
-                        if 'mapping' in tail_f:
-                            if isinstance(val, (int, float)):
-                                val = tail_f['mapping'].get(str(int(val)), val)
-                            elif isinstance(val, str):
-                                val = tail_f['mapping'].get(val.strip(), val)
-
-                        result[tail_f['name']] = val
+                    chunk, tlen = get_chunk(tail_f, cursor)
+                    if chunk is not None:
+                        val = self.read_field(tail_f['type'], chunk, tail_f)
+                        result[tail_f['name']] = self._process_value(val, tail_f)
                         cursor += tlen
         except Exception as e:
-            result['_error'] = f"解析异常: {str(e)}"
+            import traceback
+            result['_error'] = f"解析异常: {str(e)} | {traceback.format_exc()}"
         return result
 
 
@@ -547,22 +469,40 @@ class FrameTableModel(QAbstractTableModel):
                         summary.append(f"🚨告警: {'/'.join(active_alarms)}")
 
                 # ====================================================
-                # 2. 专门针对 0x5C (控制器消息) 屏蔽电压，并提取故障明细
+                # 2. 针对 0x5C (控制器消息) 屏蔽电压，提取故障明细
                 # ====================================================
                 if frame['type'] == '0x5C':
                     faults = []
-                    # 遍历我们在 JSON 里定义好的 6 个控制器故障位
                     fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
                     for fk in fault_keys:
                         val = f_data.get(fk)
-                        # 如果存在该字段且不是"正常"，说明触发了故障！
-                        if val and val != "正常":
-                            faults.append(val)
+                        if val and val not in ("正常", 0, "0"):
+                            faults.append(str(val))
 
                     if faults:
                         summary.append(f"🛠️故障: {'/'.join(faults)}")
                     else:
                         summary.append("✅无故障")
+
+                # ====================================================
+                # 🌟 新增：针对 0x08 (平台通用应答) 显示对应指令名和执行结果
+                # ====================================================
+                elif frame['type'] == '0x08':
+                    # 提取应答的指令 HEX 字符串 (例如 "2b")
+                    ack_type = f_data.get('ack_msg_type')
+                    if ack_type:
+                        # 格式化为 "0x2B" 去字典里反查中文名
+                        ack_type_hex = f"0x{str(ack_type).upper()}"
+                        ack_name = self.get_msg_name(ack_type_hex)
+                        summary.append(f"应答: {ack_name} ({ack_type_hex})")
+
+                    # 提取执行结果错误码
+                    err_code = f_data.get('error_code')
+                    if err_code:
+                        if "操作成功" not in str(err_code):
+                            summary.append(f"❌ [{err_code}]")
+                        else:
+                            summary.append("✅ 成功")
 
                 # 3. 其他常规消息依然显示外接电压
                 else:
