@@ -3,7 +3,7 @@
     "sync_header": "4244",
     "byte_order": "big",
     "skip_checksum_verification": true,
-    "comment": "v1.59 (找回 0x08 平台通用应答，修复重构遗漏)"
+    "comment": "v1.51 全面支持 (涵盖所有附录字典、错误码描述及控制指令)"
   },
   "common_mappings": {
     "alarm_bits_map": {
@@ -27,7 +27,7 @@
   },
   "messages": {
     "0x08": {
-      "name": "平台通用应答",
+      "name": "平台通用应答(含道钉应答)",
       "fields": [
         {
           "name": "time",
@@ -299,8 +299,9 @@
         },
         {
           "name": "ack_msg_type",
-          "type": "U1",
-          "desc": "应答的消息类别"
+          "type": "BYTES",
+          "length": 1,
+          "desc": "应答的消息类别(HEX)"
         },
         {
           "name": "ack_mid",
@@ -316,7 +317,43 @@
         {
           "name": "error_code",
           "type": "U1",
-          "desc": "错误码"
+          "mapping": {
+            "0": "操作成功 / 扫描无效(道钉)",
+            "1": "扫描成功(道钉)",
+            "2": "扫描超时(道钉)",
+            "4": "扫描为空(道钉)",
+            "6": "扫描失败(道钉)",
+            "100": "操作失败",
+            "101": "设防过程ACC线检测失败",
+            "102": "设防过程命令超时",
+            "103": "开锁过程ACC线检测失败",
+            "104": "开锁过程命令超时",
+            "105": "关锁过程ACC线检测失败",
+            "106": "大灯开关超时",
+            "107": "参数存储失败",
+            "108": "电池仓开启超时",
+            "109": "操作不允许",
+            "110": "车辆移动",
+            "111": "服务器域名和端口设置失效",
+            "112": "头盔离位",
+            "113": "头盔锁操作(上锁或开锁)超时",
+            "114": "头盔锁开关超时",
+            "115": "头盔锁状态查询超时"
+          },
+          "desc": "执行错误码"
+        },
+        {
+          "name": "extra_str",
+          "type": "ASCII_STR",
+          "length": -1,
+          "mapping": {
+            "ver error": "ver error (协议版本错误)",
+            "length error": "length error (消息长度错误)",
+            "crc error": "crc error (校验错误)",
+            "type error": "type error (消息类别错误)",
+            "msg too short": "msg too short (收到消息长度小于定义长度)"
+          },
+          "desc": "附加字符串"
         }
       ]
     },
@@ -622,7 +659,7 @@
         {
           "name": "sat_valid",
           "type": "U1",
-          "desc": "卫星有效位(Bit0)"
+          "desc": "卫星有效位"
         },
         {
           "name": "acc_raw",
@@ -679,6 +716,16 @@
               "mask": 112,
               "shift": 4,
               "desc": "方向值"
+            },
+            {
+              "name": "acc_state",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": "关",
+                "1": "开"
+              },
+              "desc": "ACC"
             }
           ]
         }
@@ -1079,7 +1126,7 @@
         {
           "name": "diff_time",
           "type": "U2",
-          "desc": "时间差值(s)"
+          "desc": "时间差值"
         },
         {
           "name": "diff_lat",
@@ -1736,7 +1783,6 @@
         {
           "name": "acc_motion_raw",
           "type": "U1",
-          "desc": "ACC及动静状态",
           "segments": [
             {
               "name": "is_motion",
@@ -1745,18 +1791,7 @@
               "mapping": {
                 "0": "静",
                 "1": "动"
-              },
-              "desc": "动静状态"
-            },
-            {
-              "name": "acc_state",
-              "mask": 2,
-              "shift": 1,
-              "mapping": {
-                "0": "断开",
-                "1": "接通"
-              },
-              "desc": "ACC状态"
+              }
             }
           ]
         },
@@ -1785,7 +1820,6 @@
         {
           "name": "dir_sat_raw",
           "type": "U1",
-          "desc": "方向和卫星",
           "segments": [
             {
               "name": "sat_count",
@@ -1799,6 +1833,16 @@
               "mask": 112,
               "shift": 4,
               "desc": "方向值"
+            },
+            {
+              "name": "acc_state",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": "关",
+                "1": "开"
+              },
+              "desc": "ACC"
             }
           ]
         }
@@ -2105,7 +2149,6 @@
         {
           "name": "acc_motion_raw",
           "type": "U1",
-          "desc": "ACC及动静状态",
           "segments": [
             {
               "name": "is_motion",
@@ -2114,18 +2157,7 @@
               "mapping": {
                 "0": "静",
                 "1": "动"
-              },
-              "desc": "动静状态"
-            },
-            {
-              "name": "acc_state",
-              "mask": 2,
-              "shift": 1,
-              "mapping": {
-                "0": "断开",
-                "1": "接通"
-              },
-              "desc": "ACC状态"
+              }
             }
           ]
         },
@@ -2154,7 +2186,6 @@
         {
           "name": "dir_sat_raw",
           "type": "U1",
-          "desc": "方向和卫星",
           "segments": [
             {
               "name": "sat_count",
@@ -2168,8 +2199,472 @@
               "mask": 112,
               "shift": 4,
               "desc": "方向值"
+            },
+            {
+              "name": "acc_state",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": "关",
+                "1": "开"
+              },
+              "desc": "ACC"
             }
           ]
+        }
+      ]
+    },
+    "0x56": {
+      "name": "配置消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "config_flags",
+          "type": "U2",
+          "desc": "综合配置标志位"
+        },
+        {
+          "name": "track_interval",
+          "type": "U2",
+          "desc": "实时追踪上报间隔(30s)"
+        },
+        {
+          "name": "track_duration",
+          "type": "U2",
+          "desc": "实时追踪持续时间(分钟)"
+        },
+        {
+          "name": "motion_sample_int",
+          "type": "U1",
+          "desc": "运动采样间隔(s)"
+        },
+        {
+          "name": "motion_report_int",
+          "type": "U1",
+          "desc": "运动上报间隔(s)"
+        },
+        {
+          "name": "static_report_int",
+          "type": "U2",
+          "desc": "静止上报间隔(m)"
+        },
+        {
+          "name": "speed_limit",
+          "type": "U1",
+          "desc": "超速门限(2km/h)"
+        },
+        {
+          "name": "temp_limit",
+          "type": "U1",
+          "desc": "温度门限(℃)"
+        },
+        {
+          "name": "disp_limit",
+          "type": "U1",
+          "desc": "位移门限(10m)"
+        },
+        {
+          "name": "auto_lock_time",
+          "type": "U1",
+          "desc": "自动落锁时长(m)"
+        },
+        {
+          "name": "uhf_power",
+          "type": "U2",
+          "desc": "UHF发射功率"
+        },
+        {
+          "name": "ext_485_ver",
+          "type": "BYTES",
+          "length": 3,
+          "desc": "485扩展版本号"
+        },
+        {
+          "name": "helmet_delay_cfg",
+          "type": "U1",
+          "desc": "头盔断电延迟与防断电配置"
+        },
+        {
+          "name": "bt_name",
+          "type": "ASCII_STR",
+          "length": 10,
+          "desc": "蓝牙名称"
+        },
+        {
+          "name": "bt_token",
+          "type": "U4",
+          "desc": "蓝牙TOKEN"
+        },
+        {
+          "name": "bt_spike_thresh",
+          "type": "I2",
+          "desc": "蓝牙道钉检测阈值"
+        },
+        {
+          "name": "bt_ver",
+          "type": "BYTES",
+          "length": 3,
+          "desc": "蓝牙模块版本"
+        },
+        {
+          "name": "res4",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "ctrl_speed_limit",
+          "type": "U2",
+          "desc": "控制器限速门限"
+        },
+        {
+          "name": "ext_485_mac",
+          "type": "BYTES",
+          "length": 6,
+          "desc": "485扩展MAC"
+        },
+        {
+          "name": "imu_ver",
+          "type": "ASCII_STR",
+          "length": 8,
+          "desc": "惯导版本"
+        },
+        {
+          "name": "dev_seq",
+          "type": "U4",
+          "desc": "设备序号"
+        },
+        {
+          "name": "dev_ver",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "设备版本号"
+        },
+        {
+          "name": "func_ver",
+          "type": "U1",
+          "desc": "功能版本号"
+        },
+        {
+          "name": "bt_mac",
+          "type": "BCD",
+          "length": 8,
+          "desc": "蓝牙MAC"
+        },
+        {
+          "name": "ctrl_type",
+          "type": "U1",
+          "desc": "控制器类型"
+        },
+        {
+          "name": "ctrl_sw_ver",
+          "type": "U1",
+          "desc": "控制器软件版本号"
+        },
+        {
+          "name": "res5",
+          "type": "U2",
+          "desc": "保留"
+        },
+        {
+          "name": "rtk_acc",
+          "type": "ASCII_STR",
+          "length": 14,
+          "desc": "千寻RTK账号"
+        },
+        {
+          "name": "rtk_pwd",
+          "type": "ASCII_STR",
+          "length": 18,
+          "desc": "千寻RTK密码"
         }
       ]
     },
@@ -2468,13 +2963,1065 @@
         },
         {
           "name": "reserved1",
-          "type": "U2",
-          "desc": "保留"
+          "type": "U2"
         },
         {
           "name": "reserved2",
+          "type": "U4"
+        }
+      ]
+    },
+    "0x5B": {
+      "name": "登录消息",
+      "fields": [
+        {
+          "name": "time",
           "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
           "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "ver_info",
+          "type": "U4",
+          "desc": "版本信息"
+        },
+        {
+          "name": "hw_type",
+          "type": "U2",
+          "desc": "硬件类型"
+        }
+      ]
+    },
+    "0x5C": {
+      "name": "控制器消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "ctrl_type",
+          "type": "U1",
+          "desc": "控制器类型"
+        },
+        {
+          "name": "voltage",
+          "type": "U4",
+          "unit": "mV",
+          "desc": "电压"
+        },
+        {
+          "name": "current",
+          "type": "U2",
+          "unit": "mA",
+          "desc": "电流"
+        },
+        {
+          "name": "hall",
+          "type": "U2",
+          "desc": "500ms HALL数"
+        },
+        {
+          "name": "speed_pct",
+          "type": "U1",
+          "desc": "最高转速百分比"
+        },
+        {
+          "name": "undervoltage",
+          "type": "U2",
+          "unit": "mV",
+          "desc": "欠压值"
+        },
+        {
+          "name": "current_limit",
+          "type": "U2",
+          "unit": "mA",
+          "desc": "限流值"
+        },
+        {
+          "name": "fault",
+          "type": "U1",
+          "segments": [
+            {
+              "name": "Bit0_堵转",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": "正常",
+                "1": "堵转故障"
+              }
+            },
+            {
+              "name": "Bit1_转把",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": "正常",
+                "1": "转把故障"
+              }
+            },
+            {
+              "name": "Bit2_欠压",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": "正常",
+                "1": "欠压告警"
+              }
+            },
+            {
+              "name": "Bit3_过压",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": "正常",
+                "1": "过压告警"
+              }
+            },
+            {
+              "name": "Bit4_刹车",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": "正常",
+                "1": "刹车故障"
+              }
+            },
+            {
+              "name": "Bit5_霍尔",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": "正常",
+                "1": "霍尔故障"
+              }
+            }
+          ],
+          "desc": "控制器故障信息"
+        },
+        {
+          "name": "ctrl_temp_prot_sw",
+          "type": "U1",
+          "desc": "控制器温度保护开关"
+        },
+        {
+          "name": "ctrl_temp_prot_val",
+          "type": "U2",
+          "desc": "控制器温度保护数值"
+        },
+        {
+          "name": "motor_temp_prot_sw",
+          "type": "U1",
+          "desc": "电机温度保护开关"
+        },
+        {
+          "name": "motor_temp_prot_val",
+          "type": "U2",
+          "desc": "电机温度保护数值"
+        },
+        {
+          "name": "ctrl_status",
+          "type": "U1",
+          "desc": "控制器状态"
+        },
+        {
+          "name": "motor_status",
+          "type": "U1",
+          "desc": "电机状态"
+        },
+        {
+          "name": "ctrl_temp",
+          "type": "I2",
+          "desc": "控制器温度"
+        },
+        {
+          "name": "motor_temp",
+          "type": "I2",
+          "desc": "电机温度"
+        },
+        {
+          "name": "ctrl_sw_ver",
+          "type": "U1",
+          "desc": "控制器软件版本"
+        }
+      ]
+    },
+    "0x5D": {
+      "name": "定制语音消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "voice_count",
+          "type": "U1",
+          "desc": "定制语音个数N"
+        }
+      ],
+      "is_loop": true,
+      "loop_count_field": "voice_count",
+      "sub_struct": [
+        {
+          "name": "voice_id",
+          "type": "U1",
+          "desc": "语音ID"
         }
       ]
     },
@@ -2491,6 +4038,312 @@
           "type": "BCD",
           "length": 8,
           "desc": "终端IMEI"
+        }
+      ]
+    },
+    "0x5F": {
+      "name": "服务器域名(IP)和端口消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "port",
+          "type": "U2",
+          "desc": "服务器端口"
+        },
+        {
+          "name": "domain_ip",
+          "type": "ASCII_STR",
+          "length": -1,
+          "desc": "服务器域名(IP)"
         }
       ]
     },
@@ -2790,7 +4643,6 @@
         {
           "name": "angle_status_raw",
           "type": "U1",
-          "desc": "角度状态",
           "segments": [
             {
               "name": "angle_valid",
@@ -2799,8 +4651,7 @@
               "mapping": {
                 "0": "无效",
                 "1": "有效"
-              },
-              "desc": "角度有效指示"
+              }
             },
             {
               "name": "fall_alarm",
@@ -2809,8 +4660,7 @@
               "mapping": {
                 "0": "无倾倒",
                 "1": "车辆倾倒"
-              },
-              "desc": "倾倒告警"
+              }
             }
           ]
         },
@@ -2818,22 +4668,2334 @@
           "name": "roll_angle",
           "type": "U2",
           "scale": 0.01,
-          "unit": "°",
-          "desc": "车辆倾斜角度"
+          "unit": "°"
         },
         {
           "name": "pitch_angle",
           "type": "U2",
           "scale": 0.01,
-          "unit": "°",
-          "desc": "车辆俯仰角度"
+          "unit": "°"
         },
         {
           "name": "yaw_angle",
           "type": "U2",
           "scale": 0.01,
-          "unit": "°",
-          "desc": "车辆航向角度"
+          "unit": "°"
+        }
+      ]
+    },
+    "0x61": {
+      "name": "UHF标签消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "scan_ind",
+          "type": "U1",
+          "desc": "标签扫描指示"
+        },
+        {
+          "name": "uid_read_ind",
+          "type": "U1",
+          "desc": "UID读取指示"
+        },
+        {
+          "name": "uid",
+          "type": "BYTES",
+          "length": 12,
+          "desc": "扫描器UID"
+        },
+        {
+          "name": "rssi",
+          "type": "I1",
+          "desc": "标签RSSI"
+        },
+        {
+          "name": "pc",
+          "type": "U2",
+          "desc": "标签PC"
+        },
+        {
+          "name": "epc",
+          "type": "BYTES",
+          "length": 16,
+          "desc": "标签EPC"
+        }
+      ]
+    },
+    "0x62": {
+      "name": "蓝牙道钉消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "scan_ind",
+          "type": "U1",
+          "desc": "道钉扫描指示(1/9/14)"
+        },
+        {
+          "name": "mac1",
+          "type": "BCD",
+          "length": 8,
+          "desc": "道钉1 MAC"
+        },
+        {
+          "name": "id1",
+          "type": "BYTES",
+          "length": 16,
+          "desc": "道钉1 ID"
+        },
+        {
+          "name": "bat1",
+          "type": "U1",
+          "desc": "道钉1 电量"
+        },
+        {
+          "name": "rssi1",
+          "type": "I1",
+          "desc": "道钉1 RSSI"
+        },
+        {
+          "name": "measure_rssi1",
+          "type": "I1",
+          "desc": "道钉1 测量强度"
+        },
+        {
+          "name": "ver1",
+          "type": "U4",
+          "desc": "道钉1 版本"
+        },
+        {
+          "name": "mac2",
+          "type": "BCD",
+          "length": 8,
+          "desc": "道钉2 MAC"
+        },
+        {
+          "name": "id2",
+          "type": "BYTES",
+          "length": 16,
+          "desc": "道钉2 ID"
+        },
+        {
+          "name": "bat2",
+          "type": "U1",
+          "desc": "道钉2 电量"
+        },
+        {
+          "name": "rssi2",
+          "type": "I1",
+          "desc": "道钉2 RSSI"
+        },
+        {
+          "name": "measure_rssi2",
+          "type": "I1",
+          "desc": "道钉2 测量强度"
+        },
+        {
+          "name": "ver2",
+          "type": "U4",
+          "desc": "道钉2 版本"
+        }
+      ]
+    },
+    "0x63": {
+      "name": "检测头盔佩戴消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "helmet_voice_play_times",
+          "type": "U1",
+          "desc": "语音提示与允许断动力位"
+        },
+        {
+          "name": "res1",
+          "type": "U1"
+        },
+        {
+          "name": "helmet_voice_allow",
+          "type": "U1"
+        },
+        {
+          "name": "res2",
+          "type": "BYTES",
+          "length": 3
+        }
+      ]
+    },
+    "0x64": {
+      "name": "相机状态消息(武吉)",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "cam_ver",
+          "type": "U1",
+          "desc": "协议版本号"
+        },
+        {
+          "name": "vendor",
+          "type": "ASCII_STR",
+          "length": 16,
+          "desc": "厂商代码"
+        },
+        {
+          "name": "model",
+          "type": "ASCII_STR",
+          "length": 16,
+          "desc": "型号"
+        },
+        {
+          "name": "cam_sw_ver",
+          "type": "U4",
+          "desc": "软件版本号"
+        },
+        {
+          "name": "photo_status",
+          "type": "U1",
+          "desc": "连续拍照状态"
+        },
+        {
+          "name": "cam_voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V"
+        },
+        {
+          "name": "func_sw",
+          "type": "U1",
+          "desc": "功能开关"
+        },
+        {
+          "name": "cam_fault",
+          "type": "U2",
+          "desc": "故障信息"
+        },
+        {
+          "name": "work_status",
+          "type": "U1",
+          "desc": "工作状态"
+        },
+        {
+          "name": "retrograde_res",
+          "type": "U1",
+          "desc": "逆行检测结果"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 6,
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x65": {
+      "name": "拍照检测消息(武吉)",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "icon_res",
+          "type": "U1",
+          "desc": "图标识别结果"
+        },
+        {
+          "name": "icon_type",
+          "type": "U1",
+          "desc": "最佳图标类型"
+        },
+        {
+          "name": "similarity",
+          "type": "U1",
+          "desc": "最高相似度"
+        },
+        {
+          "name": "angle_res",
+          "type": "U1",
+          "desc": "90度停车检测结果"
+        },
+        {
+          "name": "line_angle",
+          "type": "U1",
+          "desc": "标志线角度"
+        },
+        {
+          "name": "res",
+          "type": "U2",
+          "desc": "保留"
+        }
+      ]
+    },
+    "0x66": {
+      "name": "相机状态消息(通用)",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "cam_type",
+          "type": "U1",
+          "desc": "相机类型(1武吉 2得图)"
+        },
+        {
+          "name": "cam_sw_ver",
+          "type": "U4",
+          "desc": "相机软件版本"
+        },
+        {
+          "name": "cam_fault",
+          "type": "U2",
+          "desc": "相机故障信息"
+        },
+        {
+          "name": "ext_data",
+          "type": "BYTES",
+          "length": -1,
+          "desc": "扩展数据"
+        }
+      ]
+    },
+    "0x67": {
+      "name": "拍照检测消息(通用)",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "icon_res",
+          "type": "U1",
+          "desc": "识别结果"
+        },
+        {
+          "name": "line_angle",
+          "type": "U1",
+          "desc": "标志线角度"
+        },
+        {
+          "name": "err_code",
+          "type": "U1",
+          "desc": "错误码"
+        },
+        {
+          "name": "ext_data",
+          "type": "BYTES",
+          "length": -1,
+          "desc": "扩展数据"
         }
       ]
     },
@@ -3132,24 +7294,975 @@
         },
         {
           "name": "res2",
-          "type": "U2",
-          "desc": "保留"
+          "type": "U2"
         },
         {
           "name": "res3",
-          "type": "U4",
-          "desc": "保留"
+          "type": "U4"
         },
         {
           "name": "hw_ver",
           "type": "BYTES",
-          "length": 20,
-          "desc": "硬件版本(Hex)"
+          "length": 20
         },
         {
           "name": "cam",
+          "type": "U1"
+        }
+      ]
+    },
+    "0x69": {
+      "name": "日志配置信息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
           "type": "U1",
-          "desc": "支持摄像"
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "net_log_sw",
+          "type": "U1",
+          "desc": "网络上报开关"
+        },
+        {
+          "name": "local_log_sw",
+          "type": "U1",
+          "desc": "本地记录开关"
+        },
+        {
+          "name": "log_level",
+          "type": "U1",
+          "desc": "日志级别"
+        },
+        {
+          "name": "log_port",
+          "type": "U2",
+          "desc": "端口号"
+        },
+        {
+          "name": "domain_len",
+          "type": "U1",
+          "desc": "域名长度"
+        },
+        {
+          "name": "domain",
+          "type": "ASCII_STR",
+          "length": -1,
+          "desc": "日志服务器域名"
+        }
+      ]
+    },
+    "0x6A": {
+      "name": "电机超载参数消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "res",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "overload_sw",
+          "type": "U2",
+          "desc": "电机超载参数开关"
+        },
+        {
+          "name": "heavy_thresh",
+          "type": "U1",
+          "unit": "kg",
+          "desc": "超重阈值"
+        },
+        {
+          "name": "overload_thresh",
+          "type": "U1",
+          "unit": "kg",
+          "desc": "超载阈值"
+        },
+        {
+          "name": "res2",
+          "type": "BYTES",
+          "length": 8,
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x6B": {
+      "name": "一键还车状态消息",
+      "fields": [
+        {
+          "name": "time",
+          "type": "U4",
+          "desc": "UTC时间"
+        },
+        {
+          "name": "signal",
+          "type": "I2",
+          "desc": "信号强度(dBm)"
+        },
+        {
+          "name": "temp",
+          "type": "I1",
+          "desc": "温度"
+        },
+        {
+          "name": "fault_1",
+          "type": "U1",
+          "desc": "头盔锁故障1"
+        },
+        {
+          "name": "status_raw",
+          "type": "U4",
+          "desc": "通用状态",
+          "segments": [
+            {
+              "name": "Bit00_电门",
+              "mask": 1,
+              "shift": 0,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门(ACC)开启"
+            },
+            {
+              "name": "Bit01_防盗开启",
+              "mask": 2,
+              "shift": 1,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "防盗开启"
+            },
+            {
+              "name": "Bit02_后轮锁开启",
+              "mask": 4,
+              "shift": 2,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮锁开启"
+            },
+            {
+              "name": "Bit03_后座锁开启",
+              "mask": 8,
+              "shift": 3,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后座锁开启"
+            },
+            {
+              "name": "Bit04_照明灯开启",
+              "mask": 16,
+              "shift": 4,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "照明灯开启"
+            },
+            {
+              "name": "Bit05_电池仓开启",
+              "mask": 32,
+              "shift": 5,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池仓开启"
+            },
+            {
+              "name": "Bit06_后轮转动",
+              "mask": 64,
+              "shift": 6,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "后轮转动"
+            },
+            {
+              "name": "Bit07_车辆移动",
+              "mask": 128,
+              "shift": 7,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "车辆移动"
+            },
+            {
+              "name": "Bit08_定位方式",
+              "mask": 256,
+              "shift": 8,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "定位方式(1:GPS 0:基站)"
+            },
+            {
+              "name": "Bit09_电池接入",
+              "mask": 512,
+              "shift": 9,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电池接入"
+            },
+            {
+              "name": "Bit10_头盔在位",
+              "mask": 1024,
+              "shift": 10,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔在位"
+            },
+            {
+              "name": "Bit11_头盔锁开关",
+              "mask": 2048,
+              "shift": 11,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁开关(1:开)"
+            },
+            {
+              "name": "Bit12_13_头盔佩戴状态",
+              "mask": 12288,
+              "shift": 12,
+              "mapping": {
+                "0": "未检测到锁",
+                "1": "佩戴头盔",
+                "2": "没有佩戴",
+                "3": "异常"
+              },
+              "desc": "头盔佩戴"
+            },
+            {
+              "name": "Bit14_电门逻辑状态",
+              "mask": 16384,
+              "shift": 14,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "电门逻辑状态"
+            },
+            {
+              "name": "Bit15_重力感应",
+              "mask": 32768,
+              "shift": 15,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "重力感应(1:超载)"
+            },
+            {
+              "name": "Bit16_边撑状态",
+              "mask": 65536,
+              "shift": 16,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "边撑状态(1:不在位)"
+            },
+            {
+              "name": "Bit17_头盔需换电池",
+              "mask": 131072,
+              "shift": 17,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔需换电池"
+            },
+            {
+              "name": "Bit18_头盔锁逻辑",
+              "mask": 262144,
+              "shift": 18,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "头盔锁逻辑(1:上锁)"
+            },
+            {
+              "name": "Bit19_相机已连接",
+              "mask": 524288,
+              "shift": 19,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "相机已连接"
+            },
+            {
+              "name": "Bit20_惯导SDK激活",
+              "mask": 1048576,
+              "shift": 20,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "惯导SDK激活"
+            },
+            {
+              "name": "Bit21_22_天线状态",
+              "mask": 6291456,
+              "shift": 21,
+              "mapping": {
+                "0": "不支持",
+                "1": "正常",
+                "2": "短路",
+                "3": "开路"
+              },
+              "desc": "天线状态"
+            },
+            {
+              "name": "Bit23_保留Bit23",
+              "mask": 8388608,
+              "shift": 23,
+              "mapping": {
+                "0": 0,
+                "1": 1
+              },
+              "desc": "保留Bit23"
+            }
+          ]
+        },
+        {
+          "name": "voltage",
+          "type": "U2",
+          "scale": 0.1,
+          "unit": "V",
+          "desc": "外接电压"
+        },
+        {
+          "name": "fault_2",
+          "type": "U1",
+          "desc": "头盔锁故障2"
+        },
+        {
+          "name": "ver",
+          "type": "U1",
+          "desc": "协议版本"
+        },
+        {
+          "name": "battery_pct",
+          "type": "U1",
+          "desc": "电量百分比"
+        },
+        {
+          "name": "reserved",
+          "type": "U1",
+          "desc": "保留"
+        },
+        {
+          "name": "imei",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMEI"
+        },
+        {
+          "name": "imsi",
+          "type": "BCD",
+          "length": 8,
+          "desc": "IMSI"
+        },
+        {
+          "name": "return_btn_trigger",
+          "type": "U1",
+          "desc": "一键还车触发"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 8,
+          "desc": "预留"
         }
       ]
     },
@@ -3453,7 +8566,7 @@
         },
         {
           "name": "bms_sn",
-          "type": "BYTES",
+          "type": "ASCII_STR",
           "length": 40,
           "desc": "BMS SN"
         },
@@ -3479,7 +8592,7 @@
         },
         {
           "name": "in_temp",
-          "type": "U2",
+          "type": "I2",
           "scale": 0.1,
           "unit": "C",
           "desc": "内温"
@@ -4135,7 +9248,7 @@
               "shift": 0,
               "mapping": {
                 "0": "默认",
-                "1": "请求检查是否在停车区"
+                "1": "请求检查"
               }
             }
           ]
@@ -5124,6 +10237,1059 @@
           "type": "BYTES",
           "length": 2,
           "desc": "预留"
+        }
+      ]
+    },
+    "0x2B": {
+      "name": "查询指令(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "query_flags",
+          "type": "U1",
+          "desc": "查询标志位"
+        }
+      ]
+    },
+    "0x23": {
+      "name": "实时位置上报参数设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "rt_track_sw",
+          "type": "U1",
+          "desc": "实时追踪开启(Bit0)"
+        },
+        {
+          "name": "interval",
+          "type": "U2",
+          "desc": "上报间隔(30s)"
+        },
+        {
+          "name": "duration",
+          "type": "U2",
+          "desc": "持续时长(分钟)"
+        }
+      ]
+    },
+    "0x25": {
+      "name": "终端重启设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "restart_flag",
+          "type": "U1",
+          "desc": "重启标志(Bit0重启,Bit1/2/3/4/5模块升级)"
+        },
+        {
+          "name": "url",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "升级地址"
+        },
+        {
+          "name": "port",
+          "type": "U4",
+          "desc": "端口号"
+        },
+        {
+          "name": "path",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "升级路径"
+        },
+        {
+          "name": "filename",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "文件名称"
+        }
+      ]
+    },
+    "0x2A": {
+      "name": "语音设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "voice_flag",
+          "type": "U1",
+          "desc": "配置(Bit0:0更新,1播放, Bit3~1:音量)"
+        },
+        {
+          "name": "voice_id",
+          "type": "U1",
+          "desc": "文件编号"
+        },
+        {
+          "name": "url",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "地址"
+        },
+        {
+          "name": "port",
+          "type": "U4",
+          "desc": "端口号"
+        },
+        {
+          "name": "path",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "路径"
+        },
+        {
+          "name": "filename",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "文件名称"
+        }
+      ]
+    },
+    "0x2D": {
+      "name": "启动和设防设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "ctrl_cmd",
+          "type": "U1",
+          "desc": "启动/设防控制指令(1启动,2设防,6预启动等)"
+        }
+      ]
+    },
+    "0x2E": {
+      "name": "防盗开关设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "anti_theft_cmd",
+          "type": "U1",
+          "desc": "防盗指令(0关,1开,2强制防盗)"
+        }
+      ]
+    },
+    "0x2F": {
+      "name": "电池仓开关设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "battery_box_cmd",
+          "type": "U1",
+          "desc": "电池仓(1开启)"
+        }
+      ]
+    },
+    "0x30": {
+      "name": "控制器限速设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "speed_limit_pct",
+          "type": "U1",
+          "desc": "限速百分比[%]"
+        }
+      ]
+    },
+    "0x31": {
+      "name": "控制器欠压保护设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "under_voltage",
+          "type": "U2",
+          "unit": "mV",
+          "desc": "保护值"
+        }
+      ]
+    },
+    "0x32": {
+      "name": "控制器限流保护设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "current_limit",
+          "type": "U2",
+          "unit": "mA",
+          "desc": "保护值"
+        }
+      ]
+    },
+    "0x33": {
+      "name": "控制器缓启动设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "slow_start",
+          "type": "U1",
+          "desc": "缓启(1缓,0快)"
+        }
+      ]
+    },
+    "0x34": {
+      "name": "控制器大灯设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "headlight",
+          "type": "U1",
+          "desc": "大灯(1开,0关)"
+        }
+      ]
+    },
+    "0x35": {
+      "name": "运动采集上报间隔设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "sample_int",
+          "type": "U1",
+          "unit": "s",
+          "desc": "采样间隔"
+        },
+        {
+          "name": "report_int",
+          "type": "U1",
+          "unit": "s",
+          "desc": "上报间隔"
+        }
+      ]
+    },
+    "0x36": {
+      "name": "静态位置上报间隔设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "static_report_int",
+          "type": "U2",
+          "unit": "m",
+          "desc": "静态上报间隔"
+        }
+      ]
+    },
+    "0x37": {
+      "name": "位移告警设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "displacement_cmd",
+          "type": "U1",
+          "desc": "位移半径与开关"
+        }
+      ]
+    },
+    "0x38": {
+      "name": "震动告警设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "shock_cmd",
+          "type": "U1",
+          "desc": "震动开关(Bit0)"
+        }
+      ]
+    },
+    "0x39": {
+      "name": "温度告警设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "temp_cmd",
+          "type": "U1",
+          "desc": "温度门限与开关"
+        }
+      ]
+    },
+    "0x3A": {
+      "name": "自动落锁设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "auto_lock_cmd",
+          "type": "U1",
+          "desc": "落锁时长与开关"
+        }
+      ]
+    },
+    "0x3B": {
+      "name": "服务器IP和端口设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "port",
+          "type": "U2",
+          "desc": "端口号"
+        },
+        {
+          "name": "ip",
+          "type": "U4",
+          "desc": "IP地址"
+        }
+      ]
+    },
+    "0x3C": {
+      "name": "蓝牙名称和TOKEN设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "bt_name",
+          "type": "ASCII_STR",
+          "length": 10,
+          "desc": "蓝牙名称"
+        },
+        {
+          "name": "bt_token",
+          "type": "U4",
+          "desc": "蓝牙TOKEN"
+        }
+      ]
+    },
+    "0x3D": {
+      "name": "服务器域名(IP)和端口设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "port",
+          "type": "U2",
+          "desc": "端口号"
+        },
+        {
+          "name": "domain",
+          "type": "ASCII_STR",
+          "length": -1,
+          "desc": "服务器域名"
+        }
+      ]
+    },
+    "0x3E": {
+      "name": "超速设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "overspeed_cmd",
+          "type": "U1",
+          "desc": "超速门限与开关"
+        }
+      ]
+    },
+    "0x40": {
+      "name": "头盔锁开锁上锁设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "helmet_lock_cmd",
+          "type": "U1",
+          "desc": "开关与落锁时间"
+        }
+      ]
+    },
+    "0x41": {
+      "name": "蓝牙道钉还车设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "spike_cmd",
+          "type": "U1",
+          "desc": "命令(1还车,2查询)"
+        },
+        {
+          "name": "rssi_thresh",
+          "type": "I1",
+          "desc": "检测阈值"
+        }
+      ]
+    },
+    "0x42": {
+      "name": "蓝牙道钉检测阈值设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "rssi_thresh",
+          "type": "I1",
+          "desc": "检测阈值"
+        },
+        {
+          "name": "rssi_config",
+          "type": "U1",
+          "desc": "阈值开关"
+        }
+      ]
+    },
+    "0x43": {
+      "name": "控制器温度保护设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "ctrl_temp_sw",
+          "type": "U1",
+          "desc": "保护开关(1开,0关)"
+        },
+        {
+          "name": "ctrl_temp_val",
+          "type": "U1",
+          "desc": "保护数值"
+        }
+      ]
+    },
+    "0x44": {
+      "name": "电机温度保护设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "motor_temp_sw",
+          "type": "I1",
+          "desc": "保护开关"
+        },
+        {
+          "name": "motor_temp_val",
+          "type": "U1",
+          "desc": "保护数值"
+        }
+      ]
+    },
+    "0x45": {
+      "name": "剩余电量和续航里程设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "battery_pct",
+          "type": "I1",
+          "desc": "剩余电量(%)"
+        },
+        {
+          "name": "mileage",
+          "type": "U2",
+          "unit": "0.1Km",
+          "desc": "续航里程"
+        },
+        {
+          "name": "status_flags",
+          "type": "U1",
+          "desc": "状态(预约/停车区)"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 3,
+          "desc": "保留"
+        }
+      ]
+    },
+    "0x46": {
+      "name": "控制器升级设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "upgrade_cmd",
+          "type": "U1",
+          "desc": "升级指令"
+        },
+        {
+          "name": "sw_ver",
+          "type": "U1",
+          "desc": "软件版本号"
+        },
+        {
+          "name": "url",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "升级地址"
+        },
+        {
+          "name": "port",
+          "type": "U4",
+          "desc": "端口号"
+        },
+        {
+          "name": "path",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "路径"
+        },
+        {
+          "name": "filename",
+          "type": "ASCII_STR",
+          "length": 20,
+          "desc": "文件名称"
+        },
+        {
+          "name": "crc",
+          "type": "U4",
+          "desc": "文件CRC"
+        }
+      ]
+    },
+    "0x47": {
+      "name": "检测头盔佩戴设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "helmet_voice_cmd",
+          "type": "U1",
+          "desc": "指令类型/断动力/语音次数"
+        },
+        {
+          "name": "delay_cfg",
+          "type": "U1",
+          "desc": "断电延迟等配置"
+        },
+        {
+          "name": "allow_voice_cfg",
+          "type": "U1",
+          "desc": "断动力语音配置"
+        }
+      ]
+    },
+    "0x48": {
+      "name": "相机状态查询(武吉)(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "res",
+          "type": "U2"
+        }
+      ]
+    },
+    "0x49": {
+      "name": "开始拍照检测(武吉)(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "icon_type",
+          "type": "U1",
+          "desc": "图标类型"
+        },
+        {
+          "name": "led_mode",
+          "type": "U1",
+          "desc": "LED补光灯模式"
+        },
+        {
+          "name": "res",
+          "type": "U2"
+        }
+      ]
+    },
+    "0x4A": {
+      "name": "UHF发射功率设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "uhf_cmd",
+          "type": "U1",
+          "desc": "指令类型(1设,0查)"
+        },
+        {
+          "name": "power",
+          "type": "U2",
+          "desc": "发射功率"
+        },
+        {
+          "name": "res",
+          "type": "U1"
+        }
+      ]
+    },
+    "0x4B": {
+      "name": "关闭蓝牙广播设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "bt_broad_cmd",
+          "type": "U1",
+          "desc": "指令类型与开关"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 3
+        }
+      ]
+    },
+    "0x4C": {
+      "name": "相机状态查询(通用)(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "res",
+          "type": "U2"
+        }
+      ]
+    },
+    "0x4D": {
+      "name": "开始拍照检测(通用)(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "led_mode",
+          "type": "U1",
+          "desc": "LED补光灯模式"
+        },
+        {
+          "name": "angle",
+          "type": "U4",
+          "desc": "允许还车角度"
+        },
+        {
+          "name": "color",
+          "type": "U1",
+          "desc": "地面颜色标志"
+        },
+        {
+          "name": "ext",
+          "type": "BYTES",
+          "length": -1,
+          "desc": "扩展数据"
+        }
+      ]
+    },
+    "0x4E": {
+      "name": "硬件信息查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "res",
+          "type": "U2"
+        }
+      ]
+    },
+    "0x4F": {
+      "name": "日志信息配置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "action",
+          "type": "U1",
+          "desc": "动作(0查,1设)"
+        },
+        {
+          "name": "net_log_sw",
+          "type": "U1",
+          "desc": "网络上报开关"
+        },
+        {
+          "name": "local_log_sw",
+          "type": "U1",
+          "desc": "本地记录开关"
+        },
+        {
+          "name": "log_level",
+          "type": "U1",
+          "desc": "日志过滤级别"
+        },
+        {
+          "name": "log_port",
+          "type": "U2",
+          "desc": "端口号"
+        },
+        {
+          "name": "domain_len",
+          "type": "U1",
+          "desc": "域名长度"
+        },
+        {
+          "name": "domain",
+          "type": "ASCII_STR",
+          "length": -1,
+          "desc": "域名"
+        }
+      ]
+    },
+    "0x80": {
+      "name": "电机超载参数设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "overload_cmd",
+          "type": "U1",
+          "desc": "指令类型"
+        },
+        {
+          "name": "overload_sw",
+          "type": "U2",
+          "desc": "电机超载参数开关"
+        },
+        {
+          "name": "heavy_thresh",
+          "type": "U1",
+          "desc": "超重阈值"
+        },
+        {
+          "name": "overload_thresh",
+          "type": "U1",
+          "desc": "超载阈值"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 8,
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x81": {
+      "name": "千寻RTK是否启用配置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "rtk_sw",
+          "type": "U1",
+          "desc": "启用开关"
+        },
+        {
+          "name": "acc_len",
+          "type": "U1",
+          "desc": "账号长度(12)"
+        },
+        {
+          "name": "rtk_acc",
+          "type": "ASCII_STR",
+          "length": 14,
+          "desc": "账号"
+        },
+        {
+          "name": "pwd_len",
+          "type": "U1",
+          "desc": "密码长度(16)"
+        },
+        {
+          "name": "rtk_pwd",
+          "type": "ASCII_STR",
+          "length": 18,
+          "desc": "密码"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 2,
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x82": {
+      "name": "设置是否启用惯导推算(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "ins_sw",
+          "type": "U1",
+          "desc": "惯导开关"
+        },
+        {
+          "name": "res",
+          "type": "U2",
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x83": {
+      "name": "寻车亮车灯设置(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "find_car_sw",
+          "type": "U1",
+          "desc": "启用开关(Bit0)"
+        }
+      ]
+    },
+    "0x84": {
+      "name": "定位模块搜星模式设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "gps_mode_cmd",
+          "type": "U1",
+          "desc": "指令类型"
+        },
+        {
+          "name": "gps_mode",
+          "type": "U1",
+          "desc": "搜星模式"
+        },
+        {
+          "name": "res",
+          "type": "U4"
+        }
+      ]
+    },
+    "0x85": {
+      "name": "定位模块安装轴向设置和查询(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "axis_cmd",
+          "type": "U1",
+          "desc": "指令类型"
+        },
+        {
+          "name": "axis_front",
+          "type": "I1",
+          "desc": "前向轴关系"
+        },
+        {
+          "name": "axis_right",
+          "type": "I1",
+          "desc": "右向轴关系"
+        },
+        {
+          "name": "axis_down",
+          "type": "I1",
+          "desc": "下向轴关系"
+        },
+        {
+          "name": "res",
+          "type": "U4"
+        }
+      ]
+    },
+    "0x86": {
+      "name": "相机参数设置和查询(武吉02)(下发)",
+      "fields": [
+        {
+          "name": "mid",
+          "type": "U2",
+          "desc": "流水号"
+        },
+        {
+          "name": "cam_cmd",
+          "type": "U1",
+          "desc": "指令类型"
+        },
+        {
+          "name": "func_sw",
+          "type": "U1",
+          "desc": "功能开关"
+        },
+        {
+          "name": "led_mode",
+          "type": "U1",
+          "desc": "LED补光灯模式"
+        },
+        {
+          "name": "similarity",
+          "type": "U1",
+          "desc": "相似度阈值"
+        },
+        {
+          "name": "line_type",
+          "type": "U1",
+          "desc": "标志线类型"
+        },
+        {
+          "name": "angle_thresh",
+          "type": "U1",
+          "desc": "角度阈值θ"
+        },
+        {
+          "name": "res",
+          "type": "BYTES",
+          "length": 16,
+          "desc": "预留"
+        }
+      ]
+    },
+    "0x28": {
+      "name": "平台通用应答包(下发)",
+      "fields": [
+        {
+          "name": "ack_msg_type",
+          "type": "BYTES",
+          "length": 1,
+          "desc": "应答的消息类别(HEX)"
+        },
+        {
+          "name": "reserved_data",
+          "type": "BYTES",
+          "length": 2,
+          "desc": "保留数据"
+        },
+        {
+          "name": "extra_str",
+          "type": "ASCII_STR",
+          "length": -1,
+          "mapping": {
+            "ver error": "ver error (协议版本错误)",
+            "length error": "length error (消息长度错误)",
+            "crc error": "crc error (校验错误)",
+            "type error": "type error (消息类别错误)",
+            "msg too short": "msg too short (收到消息长度小于定义长度)"
+          },
+          "desc": "附加字符串"
         }
       ]
     }

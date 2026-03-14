@@ -18,9 +18,8 @@ from PyQt6.QtGui import QStandardItemModel, QStandardItem, QFont
 
 
 # ==========================================
-# 核心业务层 (Model): 解析引擎 (完全继承之前的逻辑)
+# 核心业务层 (Model): 解析引擎
 # ==========================================
-
 class ProtocolDecoder:
     def __init__(self, config_path):
         if not os.path.exists(config_path):
@@ -49,7 +48,7 @@ class ProtocolDecoder:
             try:
                 bit_index = int(bit_index_str)
                 is_set = (value >> bit_index) & 1
-                result[desc] = int(is_set)  # 0或1
+                result[desc] = int(is_set)
             except:
                 continue
         return result
@@ -72,46 +71,35 @@ class ProtocolDecoder:
             val = self.parse_bcd(chunk)
         elif f_type == 'BYTES':
             val = binascii.hexlify(chunk).decode('ascii')
-
-        # ====== 新增：支持将任意长度的十六进制转换为十进制显示 ======
         elif f_type == 'HEX2DEC':
             hex_str = binascii.hexlify(chunk).decode('ascii')
-            # 转换为十进制后，将其转为字符串格式，防止 UI 显示科学计数法
             val = str(int(hex_str, 16))
 
-        # ====== 新增：UTC 绝对秒转北京时间字符串 ======
         elif f_type == 'TIMESTAMP_BJ':
-            import datetime as dt_mod  # 【核心修复】：使用别名导入，绝对不干扰全局的 struct 和 datetime！
-            # 1. 先按 4 字节无符号整数解包出秒数
+            import datetime as dt_mod
             seconds = struct.unpack('>I', chunk)[0]
             try:
-                # 2. 从 UTC 时间戳加上 8 小时偏移量，格式化为易读的字符串
                 dt = dt_mod.datetime.fromtimestamp(seconds, dt_mod.timezone.utc) + dt_mod.timedelta(hours=8)
                 val = dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
-                val = str(seconds)  # 万一转换失败，兜底显示原始数字
+                val = str(seconds)
 
-        # ====== 喵走协议专属：经纬度算法 ======
         elif f_type == 'MZ_LATLNG':
             raw_val = struct.unpack('>I', chunk)[0]
-            # 公式：Value = (度*60 + 分) * 30000 => Decimal = Value / 30000 / 60
             val = round(raw_val / 1800000.0, 6)
 
-        # ====== 喵走协议专属：不定长 ASCII 字符串 ======
         elif f_type == 'ASCII_STR':
             try:
-                # 过滤掉末尾可能的空字符
                 val = chunk.decode('ascii', errors='ignore').strip('\x00')
             except Exception:
                 val = str(chunk)
 
-        # 【支持 BITFIELD_U2】
         elif f_type.startswith('BITFIELD_'):
             if f_type == 'BITFIELD_U4':
                 fmt, width = '>I', 32
             elif f_type == 'BITFIELD_U2':
                 fmt, width = '>H', 16
-            else:  # BITFIELD_U1
+            else:
                 fmt, width = '>B', 8
 
             int_val = struct.unpack(fmt, chunk)[0]
@@ -134,7 +122,6 @@ class ProtocolDecoder:
                     elif abs(scale - 0.01) < 1e-9:
                         val = round(val, 2)
                     else:
-                        # 新增兜底：其他所有比例（包含 0.00001 等）最多只保留 6 位小数
                         val = round(val, 6)
                 if 'offset' in field_info: val = val + field_info['offset']
                 if 'unit' in field_info: val = f"{val}{field_info['unit']}"
@@ -155,16 +142,14 @@ class ProtocolDecoder:
                     length = 1
                 elif f_type in ['U2', 'I2', 'BITFIELD_U2']:
                     length = 2
-                # ====== 修改：增加复合类型占 4 字节 ======
                 elif f_type in ['U4', 'I4', 'BITFIELD_U4', 'TIMESTAMP_BJ', 'MZ_LATLNG']:
                     length = 4
                 elif f_type in ['BCD', 'BYTES', 'HEX2DEC']:
                     length = field.get('length', 1)
-                # ====== 喵走协议专属：不定长字符长度推断 ======
+                    if length == -1: length = len(body_bytes) - cursor  # 支持剩余全量截取
                 elif f_type == 'ASCII_STR':
                     length = field.get('length', -1)
-                    if length == -1:
-                        length = len(body_bytes) - cursor  # 占满剩余所有长度
+                    if length == -1: length = len(body_bytes) - cursor
 
                 if cursor + length > len(body_bytes):
                     result[f_name] = "<Truncated>"
@@ -179,7 +164,6 @@ class ProtocolDecoder:
                         mask = seg.get('mask', 0xFF)
                         shift = seg.get('shift', 0)
                         seg_val = (val & mask) >> shift
-
                         if 'scale' in seg:
                             seg_val = seg_val * seg['scale']
                             scale = seg['scale']
@@ -190,15 +174,26 @@ class ProtocolDecoder:
                             elif abs(scale - 0.01) < 1e-9:
                                 seg_val = round(seg_val, 2)
                             else:
-                                seg_val = round(seg_val, 6)  # 新增兜底
+                                seg_val = round(seg_val, 6)
                         if 'offset' in seg: seg_val = seg_val + seg['offset']
-                        if 'mapping' in seg: seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
+                        if 'mapping' in seg:
+                            seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
                         if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
                         result[seg_name] = seg_val
                 else:
+                    # =======================================================
+                    # 🚀 修复核心：安全地处理 mapping，防止字典或字符串转换报错
+                    # =======================================================
+                    if 'mapping' in field:
+                        if isinstance(val, (int, float)):
+                            val = field['mapping'].get(str(int(val)), val)
+                        elif isinstance(val, str):
+                            # 对字符串去空后匹配（兼容类似 "crc error" 的翻译）
+                            val = field['mapping'].get(val.strip(), val)
                     result[f_name] = val
                 cursor += length
 
+            # 处理 is_loop 循环体数据
             if msg_def.get('is_loop') and 'sub_struct' in msg_def:
                 count_field = msg_def.get('loop_count_field')
                 loop_count = 0
@@ -223,6 +218,7 @@ class ProtocolDecoder:
                             slen = 4
                         elif sf_type in ['BCD', 'BYTES', 'HEX2DEC']:
                             slen = sub_f.get('length', 1)
+                            if slen == -1: slen = len(body_bytes) - cursor
                         elif sf_type == 'ASCII_STR':
                             slen = sub_f.get('length', -1)
                             if slen == -1: slen = len(body_bytes) - cursor
@@ -247,23 +243,28 @@ class ProtocolDecoder:
                                     elif abs(scale - 0.01) < 1e-9:
                                         seg_val = round(seg_val, 2)
                                     else:
-                                        seg_val = round(seg_val, 6)  # 新增兜底
+                                        seg_val = round(seg_val, 6)
                                 if 'offset' in seg: seg_val = seg_val + seg['offset']
-                                if 'mapping' in seg: seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
+                                if 'mapping' in seg:
+                                    seg_val = seg['mapping'].get(str(int(seg_val)), seg_val)
                                 if 'unit' in seg: seg_val = f"{seg_val}{seg['unit']}"
                                 item[seg_name] = seg_val
                         else:
+                            # 循环体中的安全 mapping
+                            if 'mapping' in sub_f:
+                                if isinstance(val, (int, float)):
+                                    val = sub_f['mapping'].get(str(int(val)), val)
+                                elif isinstance(val, str):
+                                    val = sub_f['mapping'].get(val.strip(), val)
                             item[sf_name] = val
                         cursor += slen
                     if item: item_list.append(item)
                 result['point_list'] = item_list
 
-            # ====== 尾部字段（如云煤网 0x09 结尾的 IMEI） ======
+            # 处理尾部附加字段
             if 'tail_fields' in msg_def:
                 for tail_f in msg_def['tail_fields']:
                     t_type = tail_f.get('type')
-
-                    # 动态计算尾部字段长度
                     if t_type in ['U1', 'I1', 'BITFIELD_U1']:
                         tlen = 1
                     elif t_type in ['U2', 'I2', 'BITFIELD_U2']:
@@ -272,58 +273,137 @@ class ProtocolDecoder:
                         tlen = 4
                     elif t_type in ['BCD', 'BYTES', 'HEX2DEC']:
                         tlen = tail_f.get('length', 1)
+                        if tlen == -1: tlen = len(body_bytes) - cursor
                     elif t_type == 'ASCII_STR':
                         tlen = tail_f.get('length', -1)
                         if tlen == -1: tlen = len(body_bytes) - cursor
                     else:
                         tlen = 1
 
-                    # 安全读取并追加到外层的 result 字典中
                     if cursor + tlen <= len(body_bytes):
                         chunk = body_bytes[cursor: cursor + tlen]
                         val = self.read_field(t_type, chunk, tail_f)
+
+                        # 尾部字段的安全 mapping
+                        if 'mapping' in tail_f:
+                            if isinstance(val, (int, float)):
+                                val = tail_f['mapping'].get(str(int(val)), val)
+                            elif isinstance(val, str):
+                                val = tail_f['mapping'].get(val.strip(), val)
+
                         result[tail_f['name']] = val
                         cursor += tlen
-            # =========================================================================
         except Exception as e:
             result['_error'] = f"解析异常: {str(e)}"
         return result
 
 
+# ==========================================
+# 流解析器 (集成全新的“智能清洗预处理器”)
+# ==========================================
+# ==========================================
+# 流解析器 (集成全新的“智能清洗预处理器”及服务器日志兼容)
+# ==========================================
+# ==========================================
+# 流解析器 (集成全新的“智能清洗预处理器”及服务器日志兼容)
+# ==========================================
+# ==========================================
+# 流解析器 (全天候防弹版：彻底杜绝日志干扰)
+# ==========================================
 class StreamParser:
     def __init__(self, decoder):
         self.decoder = decoder
         self.buffer = bytearray()
         self.SYNC_HEADER = bytes.fromhex(self.decoder.config.get('sync_header', '4244'))
 
-        # ====== 动态读取包头配置，兼容多种协议 ======
         self.header_size = self.decoder.config.get('header_size', 8)
         self.len_offset = self.decoder.config.get('len_offset', 6)
-        self.checksum_size = self.decoder.config.get('checksum_size', 2)
 
-        # 兼容喵走：长度包含了整个包
+        self.len_size = self.decoder.config.get('len_size', 2)
+
+        self.checksum_size = self.decoder.config.get('checksum_size', 2)
         self.len_includes_all = self.decoder.config.get('len_includes_all', False)
-        # 动态获取命令码偏移量 (喵走 AAAA 为 5，其他默认为 2)
+
         default_msg_offset = 5 if self.SYNC_HEADER.hex().upper() == 'AAAA' else 2
         self.msg_type_offset = self.decoder.config.get('msg_type_offset', default_msg_offset)
 
     def feed(self, raw_text):
         import re, struct
-        spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', raw_text)
-        chunks = spaced_text.split()
+
+        lines = raw_text.splitlines()
         sync_hex = self.SYNC_HEADER.hex().lower()
 
-        for chunk in chunks:
-            # ====== 【核心修复】：移除严苛的长度限制，全面兼容带空格的 Hex 报文 ======
-            if len(chunk) % 2 != 0:
-                chunk = chunk[:-1]  # 保护机制：自动丢弃奇数位残片，绝不让底层半字节错位
-            if not chunk:
+        for line in lines:
+            line = line.strip()
+            if not line:
                 continue
-            try:
-                self.buffer.extend(bytes.fromhex(chunk))
-            except:
-                pass
 
+            # ====================================================
+            # 🛡️ 强制黑名单：拦截蓝牙、本地控制器串口
+            # ====================================================
+            line_lower = line.lower()
+            if "ble send" in line_lower or "ble recv" in line_lower or "ctrl send" in line_lower or "ctrl_recv" in line_lower:
+                continue
+
+            # ====================================================
+            # 策略 1: 精准提取终端串口的 HexDump (EasyLogger 格式)
+            # ====================================================
+            match = re.search(r'(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}:|[0-9A-Fa-f]{8}:)\s*(.*)', line)
+            if match:
+                payload = match.group(1)
+                hex_part = re.split(r'\s{3,}', payload)[0]
+                pure_hex = re.sub(r'[^0-9a-fA-F]', '', hex_part)
+                if len(pure_hex) % 2 != 0:
+                    pure_hex = pure_hex[:-1]
+                if pure_hex:
+                    try:
+                        self.buffer.extend(bytes.fromhex(pure_hex))
+                    except:
+                        pass
+                continue
+
+            # ====================================================
+            # 策略 2: 精准提取服务器导出的纯净日志 (长连续十六进制)
+            # ====================================================
+            found_server_log = False
+            for word in line.split():
+                word_clean = re.sub(r'[^0-9a-fA-F]', '', word)
+                # 只有连续十六进制超过16位且包含包头，才认定为报文
+                if word_clean.lower().startswith(sync_hex) and len(word_clean) >= self.header_size * 2:
+                    if len(word_clean) % 2 != 0:
+                        word_clean = word_clean[:-1]
+                    try:
+                        self.buffer.extend(bytes.fromhex(word_clean))
+                        found_server_log = True
+                    except:
+                        pass
+            if found_server_log:
+                continue
+
+            # ====================================================
+            # 策略 3: 绝对屏蔽脏日志 (修复 4244 时间戳乱入 Bug)
+            # ====================================================
+            # 走到这里的行，如果它是以 D/PWR, I/nbio, V/CONFIG 这种格式开头
+            # 说明它全是文字打印，即使里面有 [10:42:44]，也100%直接销毁！
+            if re.match(r'^[A-Z]/[A-Za-z0-9_]+', line):
+                continue
+
+            # ====================================================
+            # 策略 4: 手动粘贴兜底 (纯报文带空格粘贴)
+            # ====================================================
+            spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', line)
+            chunks = spaced_text.split()
+
+            for chunk in chunks:
+                if len(chunk) % 2 != 0:
+                    chunk = chunk[:-1]
+                if chunk:
+                    try:
+                        self.buffer.extend(bytes.fromhex(chunk))
+                    except:
+                        pass
+
+        # === 核心切帧逻辑 ===
         frames = []
         while True:
             head_idx = self.buffer.find(self.SYNC_HEADER)
@@ -334,14 +414,14 @@ class StreamParser:
             if head_idx > 0:
                 self.buffer = self.buffer[head_idx:]
 
-            # 动态判断包头是否完整
             if len(self.buffer) < self.header_size:
                 break
 
-            # 动态获取数据包体的长度
-            body_len = struct.unpack('>H', self.buffer[self.len_offset: self.len_offset + 2])[0]
+            if getattr(self, 'len_size', 2) == 1:
+                body_len = self.buffer[self.len_offset]
+            else:
+                body_len = struct.unpack('>H', self.buffer[self.len_offset: self.len_offset + 2])[0]
 
-            # 兼容不同协议对“长度”的定义
             if self.len_includes_all:
                 total_len = body_len
             else:
@@ -360,30 +440,24 @@ class StreamParser:
 
     def process_frame(self, data):
         import struct
-
-        # 防止越界
         if self.msg_type_offset >= len(data):
             return None
-
         msg_type = data[self.msg_type_offset]
         msg_type_hex = f"0x{msg_type:02X}"
 
-        # 动态判断是否包含 seq (旧协议有2字节序号，喵走协议有1字节，其他占位)
         if self.header_size == 8:
             seq = struct.unpack('>H', data[3:5])[0]
         elif self.header_size == 10:
-            seq = data[6]  # 喵走协议流水号
+            seq = data[6]
         else:
             seq = "N/A"
 
-            # 根据动态 header_size 和 checksum_size 截取真正的 body
         if self.checksum_size > 0:
             body = data[self.header_size: -self.checksum_size]
         else:
             body = data[self.header_size:]
 
         decoded_data = self.decoder.decode_body(msg_type_hex, body)
-
         return {"type": msg_type_hex, "seq": seq, "data": decoded_data}
 
 
@@ -407,17 +481,17 @@ class ParseWorker(QThread):
             count = 0
             batch = []
             with open(self.filename, 'r', encoding='utf-8', errors='ignore') as f:
+                # 为了支持跨行的预处理缓冲，在读文件时使用大块读取更稳妥
+                # 但由于 feed 内部按行进行了强力拆分，逐行喂入同样可行且不会干扰 HexDump 解析
                 for line in f:
                     frames = parser.feed(line)
                     if frames:
                         batch.extend(frames)
                         count += len(frames)
-                        # 每积累 200 条更新一次 UI，提升性能
                         if len(batch) >= 200:
                             self.batch_ready.emit(batch)
                             self.progress.emit(count)
                             batch = []
-            # 发送剩余的帧
             if batch:
                 self.batch_ready.emit(batch)
                 self.progress.emit(count)
@@ -461,9 +535,9 @@ class FrameTableModel(QAbstractTableModel):
             if col == 2: return frame['type']
             if col == 3: return self.get_msg_name(frame['type'])
             if col == 4:
-                # 生成摘要：提取告警、电压、电量等直观信息
                 summary = []
 
+                # 1. 提取通用告警 (如 0x51 报文)
                 if 'alarm_bits' in f_data:
                     active_alarms = []
                     for alarm_name, is_active in f_data['alarm_bits'].items():
@@ -472,9 +546,30 @@ class FrameTableModel(QAbstractTableModel):
                     if active_alarms:
                         summary.append(f"🚨告警: {'/'.join(active_alarms)}")
 
-                if 'voltage' in f_data:
-                    summary.append(f"V:{f_data['voltage']}")
+                # ====================================================
+                # 2. 专门针对 0x5C (控制器消息) 屏蔽电压，并提取故障明细
+                # ====================================================
+                if frame['type'] == '0x5C':
+                    faults = []
+                    # 遍历我们在 JSON 里定义好的 6 个控制器故障位
+                    fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
+                    for fk in fault_keys:
+                        val = f_data.get(fk)
+                        # 如果存在该字段且不是"正常"，说明触发了故障！
+                        if val and val != "正常":
+                            faults.append(val)
 
+                    if faults:
+                        summary.append(f"🛠️故障: {'/'.join(faults)}")
+                    else:
+                        summary.append("✅无故障")
+
+                # 3. 其他常规消息依然显示外接电压
+                else:
+                    if 'voltage' in f_data:
+                        summary.append(f"V:{f_data['voltage']}")
+
+                # 4. 其他特殊信息的摘要 (GPS 定位点数、BMS 健康度等)
                 lat_val = f_data.get('lat', f_data.get('pt1_lat'))
                 total_pts = 0
                 if lat_val is not None:
@@ -500,12 +595,12 @@ class FrameTableModel(QAbstractTableModel):
 class EcuMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("多协议解析工具 (GUI版)")
+        self.setWindowTitle("多协议解析全能工作站 (GUI版)")
         self.resize(1000, 700)
 
         self.all_frames = []
         self.filtered_frames = []
-        self.decoder = None  # 先置空，稍后由 UI 触发加载
+        self.decoder = None
 
         self.init_ui()
 
@@ -514,11 +609,9 @@ class EcuMainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
-        # --- 新增：顶部快速解析栏 ---
         self.quick_parse_layout = QHBoxLayout()
-
         self.quick_parse_input = QLineEdit()
-        self.quick_parse_input.setPlaceholderText("在此粘贴单条或多条原始 Hex 报文 (例如: 42 44 51... 或 AAAA 01...)")
+        self.quick_parse_input.setPlaceholderText("可直接粘贴包含了乱码、行号的嵌入式原始日志，系统将智能提取 Hex 数据！")
         self.quick_parse_input.setClearButtonEnabled(True)
 
         self.quick_parse_btn = QPushButton("🚀 快速解析")
@@ -529,22 +622,18 @@ class EcuMainWindow(QMainWindow):
 
         main_layout.addLayout(self.quick_parse_layout)
 
-        # 绑定事件
         self.quick_parse_btn.clicked.connect(self.on_quick_parse_clicked)
         self.quick_parse_input.returnPressed.connect(self.on_quick_parse_clicked)
-        # ---------------------------
 
-        # 1. 顶部控制栏
         control_layout = QHBoxLayout()
-
         self.combo_protocol = QComboBox()
-        self.populate_protocols()  # 扫描本地 json 文件
+        self.populate_protocols()
         self.combo_protocol.currentIndexChanged.connect(self.change_protocol)
 
         control_layout.addWidget(QLabel("📜 协议格式:"))
         control_layout.addWidget(self.combo_protocol)
 
-        self.btn_load = QPushButton("📂 打开日志文件 (.txt)")
+        self.btn_load = QPushButton("📂 打开日志文件 (.txt/.log)")
         self.btn_load.clicked.connect(self.load_file)
 
         self.combo_filter = QComboBox()
@@ -566,15 +655,12 @@ class EcuMainWindow(QMainWindow):
 
         main_layout.addLayout(control_layout)
 
-        # 进度条
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
 
-        # 2. 上下分栏设计 (Splitter)
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # 上半部分：数据表格
         self.table_view = QTableView()
         self.table_model = FrameTableModel()
         self.table_model.get_msg_name = lambda t: self.decoder.msgs.get(t, {}).get('name',
@@ -587,7 +673,6 @@ class EcuMainWindow(QMainWindow):
         self.table_view.clicked.connect(self.on_row_clicked)
         splitter.addWidget(self.table_view)
 
-        # 下半部分：JSON 树状图
         self.tree_view = QTreeView()
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["字段结构解析详情"])
@@ -595,20 +680,16 @@ class EcuMainWindow(QMainWindow):
         self.tree_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         splitter.addWidget(self.tree_view)
 
-        # 设置初始上下比例 6:4
         splitter.setSizes([400, 300])
         main_layout.addWidget(splitter)
 
-        # ✅ 在所有 UI 控件都初始化完毕后，再触发一次协议加载
         self.change_protocol()
 
     def populate_protocols(self):
         json_files = [f for f in os.listdir('.') if f.endswith('.json')]
-
         if not json_files:
             QMessageBox.warning(self, "警告", "当前目录下没有找到任何 .json 协议文件！")
             return
-
         for jf in json_files:
             self.combo_protocol.addItem(jf, jf)
 
@@ -616,10 +697,8 @@ class EcuMainWindow(QMainWindow):
         protocol_file = self.combo_protocol.currentData()
         if not protocol_file:
             return
-
         try:
             self.decoder = ProtocolDecoder(protocol_file)
-
             if hasattr(self, 'parser'):
                 del self.parser
 
@@ -631,15 +710,12 @@ class EcuMainWindow(QMainWindow):
             self.combo_filter.clear()
             self.combo_filter.addItem("显示所有类型", "ALL")
             self.combo_filter.blockSignals(False)
-
             self.lbl_status.setText(f"✅ 已切换协议为: {protocol_file}")
-
         except Exception as e:
             QMessageBox.critical(self, "协议加载失败", f"无法加载 {protocol_file}，请检查 JSON 格式！\n{str(e)}")
 
     def on_quick_parse_clicked(self):
         import traceback
-
         try:
             raw_text = self.quick_parse_input.text().strip()
             if not raw_text:
@@ -659,14 +735,12 @@ class EcuMainWindow(QMainWindow):
                                     "未能识别出有效的协议帧。\n请检查数据是否包含正确的包头及长度配置。")
                 return
 
-            # ====== 修复：将数据添加到内存，并同步更新全部过滤逻辑 ======
             for frame in parsed_frames:
                 msg_def = self.decoder.msgs.get(frame['type'], {})
                 frame['name'] = msg_def.get('name', '未知消息')
-                frame['seq'] = "手动"  # 标记为手动快速解析
+                frame['seq'] = "手动"
                 self.all_frames.append(frame)
 
-            # 更新下拉框选项
             current_filter = self.combo_filter.currentData()
             self.combo_filter.blockSignals(True)
             self.combo_filter.clear()
@@ -680,10 +754,8 @@ class EcuMainWindow(QMainWindow):
                 self.combo_filter.setCurrentIndex(idx)
             self.combo_filter.blockSignals(False)
 
-            # 执行过滤并刷新表格模型
             self.apply_filter()
 
-            # 滚动到底部并选中最新行
             last_row_index = len(self.filtered_frames) - 1
             if last_row_index >= 0:
                 model_index = self.table_model.index(last_row_index, 0)
@@ -693,7 +765,6 @@ class EcuMainWindow(QMainWindow):
 
             self.lbl_status.setText("⚡ 快速解析成功！已追加至列表。")
             self.quick_parse_input.clear()
-
         except Exception as e:
             error_msg = traceback.format_exc()
             QMessageBox.critical(self, "程序崩溃拦截", f"底层解析抛出异常：\n\n{error_msg}")
@@ -719,8 +790,8 @@ class EcuMainWindow(QMainWindow):
 
         self.btn_load.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setMaximum(0)  # 跑马灯模式
-        self.lbl_status.setText("正在极速解析中...")
+        self.progress_bar.setMaximum(0)
+        self.lbl_status.setText("正在智能清洗和解析日志中...")
 
         self.worker = ParseWorker(file_path, self.decoder)
         self.worker.batch_ready.connect(self.on_batch_ready)
@@ -738,15 +809,13 @@ class EcuMainWindow(QMainWindow):
     def on_parse_finished(self, total_count):
         self.btn_load.setEnabled(True)
         self.progress_bar.setVisible(False)
-        self.lbl_status.setText(f"解析完成！共 {total_count} 条有效帧。")
+        self.lbl_status.setText(f"解析完成！共提取 {total_count} 条有效指令。")
         self.btn_export.setEnabled(True)
 
-        # 追加 name
         for frame in self.all_frames:
             msg_def = self.decoder.msgs.get(frame['type'], {})
             frame['name'] = msg_def.get('name', '未知消息')
 
-        # 更新下拉框选项
         types = set(f['type'] for f in self.all_frames)
         self.combo_filter.blockSignals(True)
         for t in sorted(types):
