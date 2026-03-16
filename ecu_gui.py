@@ -33,8 +33,8 @@ class ProtocolDecoder:
     def format_time(self, timestamp):
         try:
             if 0 < timestamp < 4102444800:
-                # 🚀 优化 2：使用现代 Python 推荐的标准时区转换方法，代替废弃的 utcfromtimestamp
-                dt = datetime.fromtimestamp(timestamp, timezone.utc)
+                # 🚀 修复时区问题：在 UTC 时间基础上加上 8 小时 (北京时间)
+                dt = datetime.fromtimestamp(timestamp, timezone.utc) + timedelta(hours=8)
                 return dt.strftime('%Y-%m-%d %H:%M:%S')
             return str(timestamp)
         except:
