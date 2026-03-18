@@ -18,7 +18,7 @@ from PyQt6.QtGui import QStandardItemModel, QStandardItem, QFont
 
 
 # ==========================================
-# 核心业务层 (Model): 解析引擎
+# 核心业务层 (Model): 解析引擎 (原生支持 TLV 动态解析)
 # ==========================================
 class ProtocolDecoder:
     def __init__(self, config_path):
@@ -33,7 +33,6 @@ class ProtocolDecoder:
     def format_time(self, timestamp):
         try:
             if 0 < timestamp < 4102444800:
-                # 🚀 修复时区问题：在 UTC 时间基础上加上 8 小时 (北京时间)
                 dt = datetime.fromtimestamp(timestamp, timezone.utc) + timedelta(hours=8)
                 return dt.strftime('%Y-%m-%d %H:%M:%S')
             return str(timestamp)
@@ -54,13 +53,11 @@ class ProtocolDecoder:
                 continue
         return result
 
-    # 🚀 优化 1 核心：抽离统一的值处理函数（缩放、偏移、映射、单位追加）
     def _process_value(self, val, field_info):
         if isinstance(val, (int, float)):
             if 'scale' in field_info:
                 val = val * field_info['scale']
                 scale = field_info['scale']
-                # 浮点数精度修正
                 if abs(scale - 0.000001) < 1e-9:
                     val = round(val, 6)
                 elif abs(scale - 0.1) < 1e-9:
@@ -73,15 +70,12 @@ class ProtocolDecoder:
             if 'offset' in field_info:
                 val = val + field_info['offset']
 
-            # 数字类型的字典映射
             if 'mapping' in field_info:
                 val = field_info['mapping'].get(str(int(val)), val)
 
-        # 字符串类型的字典映射 (兼容 "crc error" 等)
         elif isinstance(val, str) and 'mapping' in field_info:
             val = field_info['mapping'].get(val.strip(), val)
 
-        # 追加单位
         if 'unit' in field_info and str(val).strip() != "":
             val = f"{val}{field_info['unit']}"
 
@@ -111,7 +105,6 @@ class ProtocolDecoder:
         elif f_type == 'TIMESTAMP_BJ':
             seconds = struct.unpack('>I', chunk)[0]
             try:
-                # 🚀 优化 2：直接使用顶部导入的 timezone 和 timedelta，更快速
                 dt = datetime.fromtimestamp(seconds, timezone.utc) + timedelta(hours=8)
                 val = dt.strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
@@ -126,6 +119,44 @@ class ProtocolDecoder:
             except:
                 val = str(chunk)
 
+        # 🚀 核心大招：TLV 动态数组深度解析
+        elif f_type == 'TLV':
+            tlv_result = {}
+            tlv_cursor = 0
+            tlv_config = field_info.get('tlv_dict', {})
+
+            # 循环读取直到 Chunk 结束
+            while tlv_cursor + 2 <= len(chunk):
+                tag = chunk[tlv_cursor]
+                val_len = chunk[tlv_cursor + 1]
+                tlv_cursor += 2
+
+                # 防止越界或错包
+                if tlv_cursor + val_len > len(chunk):
+                    break
+
+                val_chunk = chunk[tlv_cursor: tlv_cursor + val_len]
+                tlv_cursor += val_len
+
+                tag_hex = f"0x{tag:02X}"
+                tag_def = tlv_config.get(tag_hex)
+
+                if tag_def:
+                    # 递归调用 read_field 解析 Value 块
+                    parsed_val = self.read_field(tag_def.get('type', 'BYTES'), val_chunk, tag_def)
+
+                    if 'segments' in tag_def and isinstance(parsed_val, int):
+                        for seg in tag_def['segments']:
+                            seg_val = (parsed_val & seg.get('mask', 0xFF)) >> seg.get('shift', 0)
+                            tlv_result[seg['name']] = self._process_value(seg_val, seg)
+                    else:
+                        tlv_result[tag_def['name']] = self._process_value(parsed_val, tag_def)
+                else:
+                    # 未知扩展模块标签兜底
+                    tlv_result[f"TLV_未知外设_{tag_hex}"] = binascii.hexlify(val_chunk).decode('ascii')
+
+            val = tlv_result
+
         elif f_type.startswith('BITFIELD_'):
             fmt, width = {
                 'BITFIELD_U4': ('>I', 32),
@@ -136,7 +167,6 @@ class ProtocolDecoder:
             mapping = field_info.get('mapping', self.common_mappings.get(field_info.get('mapping_ref'), {}))
             val = self.parse_bitfield(int_val, mapping, width)
 
-        # 时间字段特殊格式化
         if isinstance(val, (int, float)) and 'BITFIELD' not in f_type and 'segments' not in field_info:
             if 'time' in field_info.get('name', '').lower() and field_info.get('unit') is None:
                 val = self.format_time(val)
@@ -150,7 +180,6 @@ class ProtocolDecoder:
         result = {}
         cursor = 0
         try:
-            # 内部闭包函数：统一处理块长度计算与数据截取
             def get_chunk(f_def, current_cursor):
                 ft = f_def['type']
                 length = {
@@ -165,7 +194,6 @@ class ProtocolDecoder:
                     return None, length
                 return body_bytes[current_cursor: current_cursor + length], length
 
-            # 1. 解析主干字段
             for field in msg_def['fields']:
                 chunk, length = get_chunk(field, cursor)
                 if chunk is None:
@@ -174,18 +202,18 @@ class ProtocolDecoder:
 
                 val = self.read_field(field['type'], chunk, field)
 
-                # 位域拆分 (Segments) 逻辑
-                if 'segments' in field and isinstance(val, int):
+                # 🚀 展开 TLV 字典：将其无缝融入主视图
+                if field['type'] == 'TLV' and isinstance(val, dict):
+                    for k, v in val.items():
+                        result[k] = v
+                elif 'segments' in field and isinstance(val, int):
                     for seg in field['segments']:
                         seg_val = (val & seg.get('mask', 0xFF)) >> seg.get('shift', 0)
-                        # 🚀 优化 1：复用提取的值处理逻辑
                         result[seg['name']] = self._process_value(seg_val, seg)
                 else:
-                    # 🚀 优化 1：主字段复用值处理逻辑
                     result[field['name']] = self._process_value(val, field)
                 cursor += length
 
-            # 2. 解析循环体结构 (is_loop)
             if msg_def.get('is_loop') and 'sub_struct' in msg_def:
                 loop_count = int(result.get(msg_def.get('loop_count_field'), 0))
                 item_list = []
@@ -194,7 +222,6 @@ class ProtocolDecoder:
                     for sub_f in msg_def['sub_struct']:
                         chunk, slen = get_chunk(sub_f, cursor)
                         if chunk is None: break
-
                         val = self.read_field(sub_f['type'], chunk, sub_f)
                         if 'segments' in sub_f and isinstance(val, int):
                             for seg in sub_f['segments']:
@@ -206,7 +233,6 @@ class ProtocolDecoder:
                     if item: item_list.append(item)
                 result['point_list'] = item_list
 
-            # 3. 解析尾部字段 (tail_fields)
             if 'tail_fields' in msg_def:
                 for tail_f in msg_def['tail_fields']:
                     chunk, tlen = get_chunk(tail_f, cursor)
@@ -219,16 +245,6 @@ class ProtocolDecoder:
             result['_error'] = f"解析异常: {str(e)} | {traceback.format_exc()}"
         return result
 
-
-# ==========================================
-# 流解析器 (集成全新的“智能清洗预处理器”)
-# ==========================================
-# ==========================================
-# 流解析器 (集成全新的“智能清洗预处理器”及服务器日志兼容)
-# ==========================================
-# ==========================================
-# 流解析器 (集成全新的“智能清洗预处理器”及服务器日志兼容)
-# ==========================================
 # ==========================================
 # 流解析器 (全天候防弹版：彻底杜绝日志干扰)
 # ==========================================
@@ -264,7 +280,7 @@ class StreamParser:
             # 🛡️ 强制黑名单：拦截蓝牙、本地控制器串口
             # ====================================================
             line_lower = line.lower()
-            if "ble send" in line_lower or "ble recv" in line_lower or "ctrl send" in line_lower or "ctrl_recv" in line_lower:
+            if "ble send" in line_lower or "ble recv" in line_lower or "ctrl send" in line_lower or "ctrl_recv" in line_lower or "mz_send" in line_lower or "mz_recv" in line_lower:
                 continue
 
             # ====================================================
@@ -367,11 +383,22 @@ class StreamParser:
         msg_type = data[self.msg_type_offset]
         msg_type_hex = f"0x{msg_type:02X}"
 
-        if self.header_size == 8:
-            seq = struct.unpack('>H', data[3:5])[0]
-        elif self.header_size == 10:
-            seq = data[6]
-        else:
+        # ==========================================
+        # 智能提取流水号 (兼容新老协议)
+        # ==========================================
+        try:
+            if self.header_size == 8:
+                # 原有协议 1 (2字节 Seq)
+                seq = struct.unpack('>H', data[3:5])[0]
+            elif self.header_size == 10:
+                # 原有协议 2 (1字节 Seq)
+                seq = data[6]
+            elif self.header_size == 6:
+                # 🌟 新增：小安协议 (header_size为6，Seq占1字节，位于索引3)
+                seq = data[3]
+            else:
+                seq = "N/A"
+        except Exception:
             seq = "N/A"
 
         if self.checksum_size > 0:
@@ -453,14 +480,55 @@ class FrameTableModel(QAbstractTableModel):
             f_data = frame['data']
 
             if col == 0: return str(frame['seq'])
-            if col == 1: return str(f_data.get('time', 'N/A'))
+            # 兼容小安协议的 timestamp 和老协议的 time
+            if col == 1: return str(f_data.get('time', f_data.get('timestamp', 'N/A')))
             if col == 2: return frame['type']
             if col == 3: return self.get_msg_name(frame['type'])
             if col == 4:
                 summary = []
+                msg_type = frame['type']
 
+                # ====================================================
+                # 🌟 新增：小安协议专属摘要优化
+                # ====================================================
+                if msg_type == '0x00':
+                    # 透传命令: 提取明文 JSON
+                    json_str = f_data.get('json_data', '')
+                    if json_str:
+                        summary.append(f"📜 {json_str}")
+
+                elif msg_type == '0x05':
+                    # 上报通知 (CMD_ALARM)
+                    alarm = f_data.get('alarm_type')
+                    if alarm:
+                        summary.append(f"🚨 {alarm}")
+
+                elif msg_type in ('0x34', '0x48'):
+                    # 事件通知 (CMD_NOTIFY / V2)
+                    evt_type = f_data.get('type')
+                    if evt_type:
+                        summary.append(f"📢 事件: {evt_type}")
+
+                elif msg_type == '0x46':
+                    # 故障信息上报 (CMD_FAULTINFO)
+                    faults = []
+                    # 遍历解析结果，揪出所有带有 "Bit" 前缀且值不是 "正常" 的隐患
+                    for k, v in f_data.items():
+                        if str(k).startswith("Bit") and str(v) not in ("正常", "0", 0):
+                            # 把 "Bit1_转把故障" 截短为 "转把故障" 让显示更清爽
+                            fault_name = k.split('_')[-1] if '_' in k else k
+                            faults.append(f"{fault_name}:{v}")
+
+                    if faults:
+                        summary.append(f"🛠️ 故障: {'/'.join(faults)}")
+                    else:
+                        summary.append("✅ 全部正常")
+
+                # ====================================================
+                # 原有 ECU 协议摘要兼容保留
+                # ====================================================
                 # 1. 提取通用告警 (如 0x51 报文)
-                if 'alarm_bits' in f_data:
+                elif 'alarm_bits' in f_data:
                     active_alarms = []
                     for alarm_name, is_active in f_data['alarm_bits'].items():
                         if is_active == 1:
@@ -468,10 +536,8 @@ class FrameTableModel(QAbstractTableModel):
                     if active_alarms:
                         summary.append(f"🚨告警: {'/'.join(active_alarms)}")
 
-                # ====================================================
                 # 2. 针对 0x5C (控制器消息) 屏蔽电压，提取故障明细
-                # ====================================================
-                if frame['type'] == '0x5C':
+                elif msg_type == '0x5C':
                     faults = []
                     fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
                     for fk in fault_keys:
@@ -484,10 +550,8 @@ class FrameTableModel(QAbstractTableModel):
                     else:
                         summary.append("✅无故障")
 
-                # ====================================================
-                # 🌟 新增：针对 0x08 (平台通用应答) 显示对应指令名和执行结果
-                # ====================================================
-                elif frame['type'] == '0x08':
+                # 3. 针对 0x08 (平台通用应答) 显示对应指令名和执行结果
+                elif msg_type == '0x08':
                     # 提取应答的指令 HEX 字符串 (例如 "2b")
                     ack_type = f_data.get('ack_msg_type')
                     if ack_type:
@@ -504,12 +568,16 @@ class FrameTableModel(QAbstractTableModel):
                         else:
                             summary.append("✅ 成功")
 
-                # 3. 其他常规消息依然显示外接电压
+                # 4. 其他常规消息依然显示外接电压和SOC
                 else:
                     if 'voltage' in f_data:
                         summary.append(f"V:{f_data['voltage']}")
+                    if 'SOC' in f_data:
+                        summary.append(f"SOC:{f_data['SOC']}")
+                    elif '电池SOC' in f_data:
+                        summary.append(f"SOC:{f_data['电池SOC']}")
 
-                # 4. 其他特殊信息的摘要 (GPS 定位点数、BMS 健康度等)
+                # 5. 其他特殊信息的摘要 (GPS 定位点数、BMS 健康度等)
                 lat_val = f_data.get('lat', f_data.get('pt1_lat'))
                 total_pts = 0
                 if lat_val is not None:
