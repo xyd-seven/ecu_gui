@@ -174,6 +174,10 @@ class ProtocolDecoder:
         return val
 
     def decode_body(self, msg_type_hex, body_bytes):
+        # 🌟 核心修复 1：拦截长度为 0 的平台应答包
+        if len(body_bytes) == 0:
+            return {"_note": "✅ 无附加消息体 (平台确认 ACK)"}
+
         msg_def = self.msgs.get(msg_type_hex)
         if not msg_def:
             return {"raw_body": binascii.hexlify(body_bytes).decode('ascii'), "_note": "未定义的消息类型"}
@@ -413,6 +417,9 @@ class StreamParser:
 # ==========================================
 # 线程层 (Controller): 防止大文件卡死界面
 # ==========================================
+# ==========================================
+# 线程层 (Controller): 防止大文件卡死界面
+# ==========================================
 class ParseWorker(QThread):
     progress = pyqtSignal(int)
     batch_ready = pyqtSignal(list)
@@ -426,14 +433,34 @@ class ParseWorker(QThread):
 
     def run(self):
         try:
-            parser = StreamParser(self.decoder)
+            # 🌟 核心升级：双引擎分离，上行下行互不干扰！
+            tx_parser = StreamParser(self.decoder)
+            rx_parser = StreamParser(self.decoder)
+
             count = 0
             batch = []
             with open(self.filename, 'r', encoding='utf-8', errors='ignore') as f:
-                # 为了支持跨行的预处理缓冲，在读文件时使用大块读取更稳妥
-                # 但由于 feed 内部按行进行了强力拆分，逐行喂入同样可行且不会干扰 HexDump 解析
                 for line in f:
-                    frames = parser.feed(line)
+                    line_lower = line.lower()
+                    frames = []
+
+                    # 识别上下行并分流
+                    if "nb_send" in line_lower or "发送" in line_lower:
+                        _frames = tx_parser.feed(line)
+                        for fr in _frames: fr['direction'] = '[上行]'
+                        frames.extend(_frames)
+
+                    elif "nb_recv" in line_lower or "接收" in line_lower:
+                        _frames = rx_parser.feed(line)
+                        for fr in _frames: fr['direction'] = '[下行]'
+                        frames.extend(_frames)
+
+                    else:
+                        # 对于没有明确方向标签的纯净报文，默认放到 tx_parser
+                        _frames = tx_parser.feed(line)
+                        for fr in _frames: fr['direction'] = ''
+                        frames.extend(_frames)
+
                     if frames:
                         batch.extend(frames)
                         count += len(frames)
@@ -446,7 +473,8 @@ class ParseWorker(QThread):
                 self.progress.emit(count)
             self.finished.emit(count)
         except Exception as e:
-            self.error.emit(str(e))
+            import traceback
+            self.error.emit(str(e) + "\n" + traceback.format_exc())
 
 
 # ==========================================
@@ -479,119 +507,207 @@ class FrameTableModel(QAbstractTableModel):
             col = index.column()
             f_data = frame['data']
 
+            # 提取方向标识
+            direction = frame.get('direction', '')
+
+            # 🌟【智能协议嗅探】：通过判断 0x00 是否为透传，自动切换两套协议的解析法则
+            is_xiaoan = False
+            msg_0x00 = self.get_msg_name('0x00')
+            if '透传' in msg_0x00 or 'WILD' in msg_0x00:
+                is_xiaoan = True
+
             if col == 0: return str(frame['seq'])
-            # 兼容小安协议的 timestamp 和老协议的 time
             if col == 1: return str(f_data.get('time', f_data.get('timestamp', 'N/A')))
             if col == 2: return frame['type']
-            if col == 3: return self.get_msg_name(frame['type'])
+
+            # ====================================================
+            # 消息名称：根据当前协议，精准区分指令与回复
+            # ====================================================
+            if col == 3:
+                msg_type = frame['type']
+                base_name = self.get_msg_name(msg_type).split('(')[0]  # 去掉括号后缀
+
+                # --- 旧版 ECU 协议 ---
+                if not is_xiaoan:
+                    if msg_type in ('0x08', '0x28'):
+                        ack_type = f_data.get('ack_msg_type')
+                        prefix = "终端应答" if msg_type == '0x08' else "平台应答"
+                        if ack_type:
+                            ack_type_hex = f"0x{str(ack_type).upper()}"
+                            ack_name = self.get_msg_name(ack_type_hex).split('(')[0]
+                            return f"{prefix} ({ack_name})"
+                        return f"通用{prefix}"
+                    return base_name
+
+                # --- 小安协议 ---
+                else:
+                    # 小安协议的法则：除了 0x00，所有平台发下来的都是针对上报的 ACK 回复
+                    if '下行' in direction and msg_type != '0x00':
+                        return f"平台回复 ({base_name})"
+                    return base_name
+
             if col == 4:
-                summary = []
                 msg_type = frame['type']
 
                 # ====================================================
-                # 🌟 新增：小安协议专属摘要优化
+                # 1. 旧版 ECU 协议 (42 44) 专属下行逻辑
                 # ====================================================
+                if not is_xiaoan:
+                    # ACK 摘要
+                    if msg_type in ('0x08', '0x28'):
+                        ack_type = f_data.get('ack_msg_type')
+                        prefix = "终端应答" if msg_type == '0x08' else "平台应答"
+                        if ack_type:
+                            ack_type_hex = f"0x{str(ack_type).upper()}"
+                            ack_name = self.get_msg_name(ack_type_hex).split('(')[0]
+                            err_code = f_data.get('error_code')
+                            if err_code and "成功" not in str(err_code) and str(err_code) != "0":
+                                return f"[ACK] ❌ {prefix} ({ack_name}) [{err_code}]"
+                            else:
+                                return f"[ACK] ✅ {prefix} ({ack_name})"
+                        return f"[ACK] ✅ 通用{prefix}"
+
+                    # 正常下发控制指令
+                    if '下行' in direction:
+                        base_name = self.get_msg_name(msg_type).split('(')[0]
+                        summary = [f"{direction} 📥 {base_name}"]
+                        params = []
+                        for k, v in f_data.items():
+                            if k not in ('time', 'timestamp', 'seq', '_note'):
+                                params.append(f"{k}:{v}")
+                        if params: summary.append(f"({', '.join(params)})")
+                        return " ".join(summary)
+
+                # ====================================================
+                # 2. 小安协议 专属下行逻辑
+                # ====================================================
+                else:
+                    # 修复登录回复：小安的平台 ACK (凡是不是 0x00 的下行包)
+                    if '下行' in direction and msg_type != '0x00':
+                        base_name = self.get_msg_name(msg_type).split('(')[0]
+
+                        # 特殊解码：提取 0x23 回复包里的 4 字节时间戳！
+                        if msg_type == '0x23' and 'raw_body' in f_data:
+                            import struct, binascii
+                            try:
+                                raw_hex = f_data['raw_body']
+                                if len(raw_hex) == 8:  # 4 bytes
+                                    ts = struct.unpack('>I', binascii.unhexlify(raw_hex))[0]
+                                    return f"[ACK] ✅ {base_name} (平台同步时间戳: {ts})"
+                            except:
+                                pass
+
+                        return f"[ACK] ✅ {base_name}"
+
+                    # 小安的透传下发指令
+                    if '下行' in direction and msg_type == '0x00':
+                        summary = [f"{direction} 📥 透传命令"]
+                        json_str = f_data.get('json_data', '')
+                        if json_str: summary.append(f"📜 {json_str}")
+                        return " ".join(summary)
+
+                # ====================================================
+                # 3. 双方共用的上行指令摘要 (由于没有方向冲突，可合并处理)
+                # ====================================================
+                summary = []
+                if direction:
+                    summary.append(f"{direction}")
+
+                # 小安协议专属上行
                 if msg_type == '0x00':
-                    # 透传命令: 提取明文 JSON
                     json_str = f_data.get('json_data', '')
-                    if json_str:
-                        summary.append(f"📜 {json_str}")
+                    if json_str: summary.append(f"📜 {json_str}")
 
                 elif msg_type == '0x05':
-                    # 上报通知 (CMD_ALARM)
                     alarm = f_data.get('alarm_type')
-                    if alarm:
-                        summary.append(f"🚨 {alarm}")
+                    if alarm: summary.append(f"🚨 {alarm}")
 
                 elif msg_type in ('0x34', '0x48'):
-                    # 事件通知 (CMD_NOTIFY / V2)
                     evt_type = f_data.get('type')
-                    if evt_type:
-                        summary.append(f"📢 事件: {evt_type}")
+                    if evt_type: summary.append(f"📢 事件: {evt_type}")
 
                 elif msg_type == '0x46':
-                    # 故障信息上报 (CMD_FAULTINFO)
                     faults = []
-                    # 遍历解析结果，揪出所有带有 "Bit" 前缀且值不是 "正常" 的隐患
                     for k, v in f_data.items():
                         if str(k).startswith("Bit") and str(v) not in ("正常", "0", 0):
-                            # 把 "Bit1_转把故障" 截短为 "转把故障" 让显示更清爽
                             fault_name = k.split('_')[-1] if '_' in k else k
                             faults.append(f"{fault_name}:{v}")
-
                     if faults:
                         summary.append(f"🛠️ 故障: {'/'.join(faults)}")
                     else:
                         summary.append("✅ 全部正常")
 
-                # ====================================================
-                # 原有 ECU 协议摘要兼容保留
-                # ====================================================
-                # 1. 提取通用告警 (如 0x51 报文)
-                elif 'alarm_bits' in f_data:
-                    active_alarms = []
-                    for alarm_name, is_active in f_data['alarm_bits'].items():
-                        if is_active == 1:
-                            active_alarms.append(alarm_name)
-                    if active_alarms:
-                        summary.append(f"🚨告警: {'/'.join(active_alarms)}")
-
-                # 2. 针对 0x5C (控制器消息) 屏蔽电压，提取故障明细
-                elif msg_type == '0x5C':
-                    faults = []
-                    fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
-                    for fk in fault_keys:
-                        val = f_data.get(fk)
-                        if val and val not in ("正常", 0, "0"):
-                            faults.append(str(val))
-
-                    if faults:
-                        summary.append(f"🛠️故障: {'/'.join(faults)}")
-                    else:
-                        summary.append("✅无故障")
-
-                # 3. 针对 0x08 (平台通用应答) 显示对应指令名和执行结果
-                elif msg_type == '0x08':
-                    # 提取应答的指令 HEX 字符串 (例如 "2b")
-                    ack_type = f_data.get('ack_msg_type')
-                    if ack_type:
-                        # 格式化为 "0x2B" 去字典里反查中文名
-                        ack_type_hex = f"0x{str(ack_type).upper()}"
-                        ack_name = self.get_msg_name(ack_type_hex)
-                        summary.append(f"应答: {ack_name} ({ack_type_hex})")
-
-                    # 提取执行结果错误码
-                    err_code = f_data.get('error_code')
-                    if err_code:
-                        if "操作成功" not in str(err_code):
-                            summary.append(f"❌ [{err_code}]")
-                        else:
-                            summary.append("✅ 成功")
-
-                # 4. 其他常规消息依然显示外接电压和SOC
-                else:
-                    if 'voltage' in f_data:
-                        summary.append(f"V:{f_data['voltage']}")
+                elif msg_type in ('0x44', '0x29'):
+                    lat = f_data.get('latitude')
+                    lon = f_data.get('longitude')
+                    ts = f_data.get('timestamp')
+                    if lon is not None and lat is not None: summary.append(f"📍 {lon}, {lat}")
+                    if ts is not None: summary.append(f"🕒 {ts}")
+                    if 'voltage' in f_data: summary.append(f"V:{f_data['voltage']}")
                     if 'SOC' in f_data:
                         summary.append(f"SOC:{f_data['SOC']}")
                     elif '电池SOC' in f_data:
                         summary.append(f"SOC:{f_data['电池SOC']}")
 
-                # 5. 其他特殊信息的摘要 (GPS 定位点数、BMS 健康度等)
-                lat_val = f_data.get('lat', f_data.get('pt1_lat'))
-                total_pts = 0
-                if lat_val is not None:
-                    total_pts = 1
-                if 'point_list' in f_data:
-                    total_pts += len(f_data['point_list'])
+                # 旧版 ECU 协议专属上行
+                elif 'alarm_bits' in f_data:
+                    active_alarms = []
+                    for alarm_name, is_active in f_data['alarm_bits'].items():
+                        if is_active == 1: active_alarms.append(alarm_name)
+                    if active_alarms: summary.append(f"🚨告警: {'/'.join(active_alarms)}")
 
-                if frame['type'] == '0x52':
-                    summary.append(f"共包含 {total_pts} 个定位点")
+                elif msg_type == '0x5C':
+                    faults = []
+                    fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
+                    for fk in fault_keys:
+                        val = f_data.get(fk)
+                        if val and val not in ("正常", 0, "0"): faults.append(str(val))
+                    if faults:
+                        summary.append(f"🛠️故障: {'/'.join(faults)}")
+                    else:
+                        summary.append("✅无故障")
 
-                if 'health' in f_data:
-                    summary.append(f"健康度:{f_data['health']}%")
+                else:
+                    if 'voltage' in f_data: summary.append(f"V:{f_data['voltage']}")
+                    if 'SOC' in f_data:
+                        summary.append(f"SOC:{f_data['SOC']}")
+                    elif '电池SOC' in f_data:
+                        summary.append(f"SOC:{f_data['电池SOC']}")
 
-                return ", ".join(summary) if summary else "无摘要"
+                # ====================================================
+                # 🌟 统一处理：旧版 0x52 定位，以及通用补充信息的结算
+                # ====================================================
+                if msg_type == '0x52':
+                    pt1_lat = f_data.get('pt1_lat')
+                    pt1_lng = f_data.get('pt1_lng')
+                    pt1_time = f_data.get('pt1_time')
+                    sat_count = f_data.get('sat_count')
+
+                    if pt1_lng is not None and pt1_lat is not None:
+                        summary.append(f"📍 {pt1_lng}, {pt1_lat}")
+                    if pt1_time is not None:
+                        summary.append(f"🕒 {pt1_time}")
+                    if sat_count is not None:
+                        summary.append(f"🛰️ {sat_count}星")
+
+                    total_pts = 0
+                    if pt1_lat is not None: total_pts = 1
+                    if 'point_list' in f_data:
+                        total_pts += len(f_data['point_list'])
+                    summary.append(f"(共 {total_pts} 个点)")
+                else:
+                    # 兼容其他带有 lat 字段的老报文
+                    lat_val = f_data.get('lat')
+                    total_pts = 0
+                    if lat_val is not None: total_pts = 1
+                    if 'point_list' in f_data: total_pts += len(f_data['point_list'])
+                    if total_pts > 0:
+                        summary.append(f"共包含 {total_pts} 个定位点")
+
+                if 'health' in f_data: summary.append(f"健康度:{f_data['health']}%")
+
+                # 👉 这个 return 现在绝对处于最外层安全缩进，不会被任何 if 锁死！
+                return " ".join(summary) if summary else "无摘要"
 
     def get_msg_name(self, hex_type):
         return "详情见下"
@@ -679,6 +795,7 @@ class EcuMainWindow(QMainWindow):
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_view.horizontalHeader().setStretchLastSection(True)
         self.table_view.clicked.connect(self.on_row_clicked)
+        self.table_view.selectionModel().currentChanged.connect(self.on_current_changed)
         splitter.addWidget(self.table_view)
 
         self.tree_view = QTreeView()
@@ -733,10 +850,25 @@ class EcuMainWindow(QMainWindow):
                 QMessageBox.warning(self, "警告", "底层协议配置未加载！\n请检查左上角是否已选择 .json 协议文件。")
                 return
 
-            if not hasattr(self, 'parser') or getattr(self, 'parser') is None:
-                self.parser = StreamParser(self.decoder)
+            # 🌟 快速解析同样使用双引擎
+            tx_parser = StreamParser(self.decoder)
+            rx_parser = StreamParser(self.decoder)
+            parsed_frames = []
 
-            parsed_frames = self.parser.feed(raw_text)
+            for line in raw_text.splitlines():
+                line_lower = line.lower()
+                if "nb_recv" in line_lower or "接收" in line_lower:
+                    _frames = rx_parser.feed(line)
+                    for fr in _frames: fr['direction'] = '[下行]'
+                    parsed_frames.extend(_frames)
+                elif "nb_send" in line_lower or "发送" in line_lower:
+                    _frames = tx_parser.feed(line)
+                    for fr in _frames: fr['direction'] = '[上行]'
+                    parsed_frames.extend(_frames)
+                else:
+                    _frames = tx_parser.feed(line)
+                    for fr in _frames: fr['direction'] = ''
+                    parsed_frames.extend(_frames)
 
             if not parsed_frames:
                 QMessageBox.warning(self, "解析失败",
@@ -746,7 +878,8 @@ class EcuMainWindow(QMainWindow):
             for frame in parsed_frames:
                 msg_def = self.decoder.msgs.get(frame['type'], {})
                 frame['name'] = msg_def.get('name', '未知消息')
-                frame['seq'] = "手动"
+                if frame.get('seq') is None or frame.get('seq') == "N/A":
+                    frame['seq'] = "手动"
                 self.all_frames.append(frame)
 
             current_filter = self.combo_filter.currentData()
@@ -850,6 +983,12 @@ class EcuMainWindow(QMainWindow):
         self.table_model.update_data(self.filtered_frames)
         self.lbl_status.setText(f"当前视图: {len(self.filtered_frames)} 条记录")
         self.tree_model.removeRows(0, self.tree_model.rowCount())
+
+    # 🌟 新增：处理键盘上下键切换焦点的事件
+    def on_current_changed(self, current, previous):
+        # 只要当前选中的行是有效的，就直接调用原有的点击处理逻辑
+        if current.isValid():
+            self.on_row_clicked(current)
 
     def on_row_clicked(self, index):
         if not index.isValid(): return

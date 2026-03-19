@@ -46,3 +46,5 @@ Thumbs.db
 /generate_miaozo_km_json.py
 /protocol_miaozou.json
 /protocol_miaozo_km.json
+/generate_xiaoan_json.py
+/protocol_xiaoan.json
