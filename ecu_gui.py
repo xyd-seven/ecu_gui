@@ -197,11 +197,13 @@ class LogHighlighter(QSyntaxHighlighter):
 
         # 🕒 时间戳与调试：正宗的高级灰，不抢戏，看得清
         c_dbg = "#8A8A8A" if is_dark_mode else "#8E908C"
-        c_time = "#8A8A8A" if is_dark_mode else "#8E908C"
+        c_time = "#A6E22E" if is_dark_mode else "#2E8B57"
 
-        # 1. 🔢 基础值类型 (整数、浮点数)
-        # 稍微收紧了数字匹配规则，防止误杀
-        self.rules.append((QRegularExpression(r"\b[-+]?\d*\.?\d+\b"), create_format(c_num)))
+        # 1. 🔢 基础值类型 (数字) - 增加“非行首”判定
+        # (?<!^\[) 确保数字如果紧跟在行首的 [ 后面，不进行高亮，防止串口工具时间戳变紫
+        # (?<![\w\-]) 和 (?![\w\-]) 依然保留，用于避开 0000-000F
+        num_regex = r"(?<!^\[)(?<![\w\-])[-+]?\b\d*\.?\d+\b(?![\w\-])"
+        self.rules.append((QRegularExpression(num_regex), create_format(c_num)))
 
         # 2. 📝 字符串提取
         self.rules.append((QRegularExpression(r'"[^"]*"'), create_format(c_str)))
@@ -219,10 +221,28 @@ class LogHighlighter(QSyntaxHighlighter):
         self.rules.append((QRegularExpression(r"(?i)\b(info|success|ok|成功|完成)\b"), create_format(c_info, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(debug|trace|调试)\b"), create_format(c_dbg, False, True)))
 
-        # 5. 🕒 终极时间戳嗅探 (极其重要：去掉 ^ 限制，精确捕获所有时间格式！)
-        # 只要代码走到这里，一旦识别出是时间，立刻用“灰色”强制覆盖掉前面的“紫色”
-        time_regex = r"\[\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\]|\[\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\]|\b\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b|\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b"
-        self.rules.append((QRegularExpression(time_regex), create_format(c_time)))
+        # 5. 🕒 终极时间戳方案 (全实写模式：解决 12:12:23 后面带空格的问题)
+
+        # 5.1 定义四个最常见的物理结构（直接实写，不嵌套，最稳固）
+        # 模式1: [年月日 时分秒(含毫秒) 空格] -> 对应您的日志格式
+        p1 = r"\[\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\s*\]"
+        # 模式2: [时分秒(含毫秒) 空格]
+        p2 = r"\[\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\s*\]"
+        # 模式3: 无括号的 年月日 时分秒
+        p3 = r"\b\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\b"
+        # 模式4: 无括号的 纯时分秒 (如 $pos 后的 3:23:4)
+        p4 = r"\b\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\b"
+
+        # 组合成最终正则
+        time_base = f"{p1}|{p2}|{p3}|{p4}"
+
+        # 5.2 全局涂绿：把日志里所有的时间戳整串变绿
+        # 由于这步在数字规则之后，它会强行覆盖掉紫色的数字
+        self.rules.append((QRegularExpression(time_base), create_format(c_time)))
+
+        # 5.3 行首纠偏：只要是紧贴行首的时间戳（串口工具自带），强行刷回灰色
+        # 使用 ^ 锚点确保只对最左侧生效
+        self.rules.append((QRegularExpression(f"^{p1}|^{p2}"), create_format(c_dbg)))
 
         # 6. ⚙️ 用户自定义规则 (保证最高优先级)
         import os, json
@@ -303,12 +323,12 @@ class TerminalTextEdit(QTextEdit):
         self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
 
         # ==========================================
-        # 🌟 新增：致敬 WindTerm 画板底色与默认字体颜色
+        # 🌟 致敬 PyCharm 2022.3 Darcula 经典配
         # ==========================================
         self.setStyleSheet("""
             QTextEdit {
-                background-color: #1C1C1C; /* WindTerm 灵魂高级灰背景 */
-                color: #F8F8F2;            /* WindTerm 柔和珍珠白文字 */
+                background-color: #2B2B2B; /* PyCharm 经典深灰背景 */
+                color: #A9B7C6;            /* PyCharm 柔和文字灰白 */
                 border: none;              /* 去除多余边框更清爽 */
             }
         """)
@@ -949,7 +969,7 @@ class EcuMainWindow(QMainWindow):
         self.setWindowTitle("多协议实时解析工作站 (GUI Pro Max 版)")
         self.resize(1300, 800)
 
-        self.is_dark_mode = False
+        self.is_dark_mode = True
         self.all_frames = []
         self.filtered_frames = []
         self.decoder = None
@@ -1016,7 +1036,7 @@ class EcuMainWindow(QMainWindow):
         self.btn_load.clicked.connect(self.load_file)
         top_bar_layout.addWidget(self.btn_load)
 
-        self.btn_theme = QPushButton("🌙 深色")
+        self.btn_theme = QPushButton("☀️ 浅色")
         self.btn_theme.clicked.connect(self.toggle_theme)
         top_bar_layout.addWidget(self.btn_theme)
 
@@ -1149,7 +1169,7 @@ class EcuMainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.progress_bar)
 
         self.change_protocol()
-        self.setStyleSheet(self.get_light_qss())
+        self.setStyleSheet(self.get_dark_qss())
         self.apply_terminal_style()
 
     # ==========================================
@@ -1539,23 +1559,23 @@ class EcuMainWindow(QMainWindow):
         # 确保 raw_log_console 存在
         if hasattr(self, 'raw_log_console') and self.raw_log_console:
             if self.is_dark_mode:
-                # 🌟 深色模式：应用 WindTerm 灵魂配色 (高级灰底 + 珍珠白字)
+                # 🌟 深色模式：应用 PyCharm Darcula 配色
                 self.raw_log_console.setStyleSheet("""
-                            QTextEdit {
-                                background-color: #1C1C1C; 
-                                color: #F8F8F2; 
-                                border: none;
-                            }
-                        """)
+                                    QTextEdit {
+                                        background-color: #2B2B2B; 
+                                        color: #A9B7C6; 
+                                        border: none;
+                                    }
+                                """)
             else:
                 # ☀️ 浅色模式：经典的白底黑字 (或是浅灰底色)
                 self.raw_log_console.setStyleSheet("""
-                            QTextEdit {
-                                background-color: #FFFFFF; 
-                                color: #333333; 
-                                border: none;
-                            }
-                        """)
+                                    QTextEdit {
+                                        background-color: #FFFFFF; 
+                                        color: #333333; 
+                                        border: none;
+                                    }
+                                """)
 
             # 🌟 最关键的一步：通知底层高亮引擎切换配色方案！
             if hasattr(self.raw_log_console, 'highlighter'):
