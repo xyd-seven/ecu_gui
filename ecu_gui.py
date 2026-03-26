@@ -33,33 +33,89 @@ class RegexConfigDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ 自定义高亮规则面板")
-        self.resize(500, 300)
+        self.resize(600, 350)
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["正则表达式 / 关键字", "颜色代码 (如 #00FF00)", "是否加粗(1是/0否)"])
+        # 🌟 列名更新
+        self.table.setHorizontalHeaderLabels(["正则表达式 / 关键字", "高亮颜色 (点击选择)", "字体加粗"])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
         btn_add = QPushButton("➕ 添加新规则")
-        btn_add.clicked.connect(self.add_row)
+        btn_add.clicked.connect(lambda: self.add_row())  # 默认添加一行
+
+        btn_delete = QPushButton("🗑️ 删除选中")
+        btn_delete.setStyleSheet("color: #EF4444;")
+        btn_delete.clicked.connect(self.delete_row)
+
         btn_save = QPushButton("💾 保存并立刻生效")
         btn_save.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold;")
         btn_save.clicked.connect(self.save_rules)
 
         btn_layout.addWidget(btn_add)
+        btn_layout.addWidget(btn_delete)
         btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
 
         self.load_rules()
 
-    def add_row(self):
+    # 🌟 核心：创建一个带颜色的按钮
+    def _create_color_button(self, color_hex):
+        btn = QPushButton(color_hex)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn_style(btn, color_hex)
+        btn.clicked.connect(lambda: self.pick_color(btn))
+        return btn
+
+    # 🌟 智能样式：根据背景颜色深浅，自动反转文字颜色防看不清
+    def _update_btn_style(self, btn, color_hex):
+        btn.setText(color_hex)
+        try:
+            r, g, b = int(color_hex[1:3], 16), int(color_hex[3:5], 16), int(color_hex[5:7], 16)
+            brightness = (r * 299 + g * 587 + b * 114) / 1000
+            text_color = "#000000" if brightness > 125 else "#FFFFFF"
+        except:
+            text_color = "#000000"
+        btn.setStyleSheet(
+            f"background-color: {color_hex}; color: {text_color}; font-weight: bold; border: 1px solid #ccc; border-radius: 4px;")
+
+    # 🌟 核心：呼出系统级调色盘
+    def pick_color(self, btn):
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        initial_color = QColor(btn.text())
+        color = QColorDialog.getColor(initial_color, self, "选择高亮颜色")
+        if color.isValid():
+            self._update_btn_style(btn, color.name().upper())
+
+    # 🌟 统一的添加行逻辑 (颜色框变按钮，加粗变复选框)
+    def add_row(self, regex="MyKeyWord", color_hex="#10B981", is_bold=True):
         r = self.table.rowCount()
         self.table.insertRow(r)
-        self.table.setItem(r, 0, QTableWidgetItem("MyKeyWord"))
-        self.table.setItem(r, 1, QTableWidgetItem("#10B981"))
-        self.table.setItem(r, 2, QTableWidgetItem("1"))
+
+        # 1. 第一列：文本框
+        self.table.setItem(r, 0, QTableWidgetItem(regex))
+
+        # 2. 第二列：颜色选择按钮
+        color_btn = self._create_color_button(color_hex)
+        self.table.setCellWidget(r, 1, color_btn)
+
+        # 3. 第三列：真正的打勾复选框
+        chk_item = QTableWidgetItem()
+        chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        chk_item.setCheckState(Qt.CheckState.Checked if is_bold else Qt.CheckState.Unchecked)
+        self.table.setItem(r, 2, chk_item)
+
+    def delete_row(self):
+        current_row = self.table.currentRow()
+        if current_row >= 0:
+            self.table.removeRow(current_row)
+        else:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "提示", "请先在表格中点击选中要删除的行！")
 
     def load_rules(self):
         if os.path.exists("highlight_rules.json"):
@@ -67,25 +123,30 @@ class RegexConfigDialog(QDialog):
                 with open("highlight_rules.json", "r", encoding="utf-8") as f:
                     rules = json.load(f)
                     for r in rules:
-                        row = self.table.rowCount()
-                        self.table.insertRow(row)
-                        self.table.setItem(row, 0, QTableWidgetItem(r.get("regex", "")))
-                        self.table.setItem(row, 1, QTableWidgetItem(r.get("color", "#FFFFFF")))
-                        self.table.setItem(row, 2, QTableWidgetItem("1" if r.get("bold") else "0"))
+                        self.add_row(
+                            regex=r.get("regex", ""),
+                            color_hex=r.get("color", "#FFFFFF"),
+                            is_bold=r.get("bold", False)
+                        )
             except:
                 pass
+
+        # 如果文件不存在或者为空，默认给一个示范行
+        if self.table.rowCount() == 0:
+            self.add_row()
 
     def save_rules(self):
         rules = []
         for i in range(self.table.rowCount()):
-            reg = self.table.item(i, 0)
-            col = self.table.item(i, 1)
-            bld = self.table.item(i, 2)
-            if reg and reg.text().strip():
+            reg_item = self.table.item(i, 0)
+            btn_widget = self.table.cellWidget(i, 1)  # 获取颜色按钮
+            chk_item = self.table.item(i, 2)  # 获取复选框
+
+            if reg_item and reg_item.text().strip():
                 rules.append({
-                    "regex": reg.text().strip(),
-                    "color": col.text().strip() if col else "#FFFFFF",
-                    "bold": (bld.text().strip() == "1") if bld else False
+                    "regex": reg_item.text().strip(),
+                    "color": btn_widget.text() if btn_widget else "#FFFFFF",
+                    "bold": True if chk_item and chk_item.checkState() == Qt.CheckState.Checked else False
                 })
         with open("highlight_rules.json", "w", encoding="utf-8") as f:
             json.dump(rules, f, ensure_ascii=False, indent=4)
@@ -93,7 +154,7 @@ class RegexConfigDialog(QDialog):
 
 
 # ==========================================
-# 🌟 高亮引擎 (支持自定义规则与多级搜索底色)
+# 🌟 高亮引擎 (满血语义分析版：支持数字/网络/日志级别智能着色)
 # ==========================================
 class LogHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark_mode=True):
@@ -112,26 +173,65 @@ class LogHighlighter(QSyntaxHighlighter):
         self.is_dark = is_dark_mode
         self.rules.clear()
 
-        # 1. 时间戳格式化
-        ts_format = QTextCharFormat()
-        ts_format.setForeground(QColor("#9CA3AF") if is_dark_mode else QColor("#6B7280"))
-        self.rules.append((QRegularExpression(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]"), ts_format))
+        def create_format(color_hex, bold=False, italic=False):
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color_hex))
+            if bold: fmt.setFontWeight(QFont.Weight.Bold)
+            if italic: fmt.setFontItalic(True)
+            return fmt
 
-        # 2. 错误关键字标红
-        err_format = QTextCharFormat()
-        err_format.setForeground(QColor("#EF4444") if is_dark_mode else QColor("#DC2626"))
-        err_format.setFontWeight(QFont.Weight.Bold)
-        self.rules.append((QRegularExpression(r"(?i)(error|fail|timeout|异常|失败)"), err_format))
+        # ==========================================
+        # 🎨 致敬 WindTerm (dige-black / Monokai 风格)
+        # ==========================================
+        # 🔢 数字：高级紫 (Monokai Purple)，极其醒目且不刺眼
+        c_num = "#AE81FF" if is_dark_mode else "#8959A8"
+        # 📝 字符串：经典黄绿 (Bright Green)
+        c_str = "#A6E22E" if is_dark_mode else "#718C00"
+        # 🌐 网络地址：明艳橙色 (Orange)
+        c_net = "#FD971F" if is_dark_mode else "#F5871F"
 
-        # 3. 动态加载用户自定义的正则规则
+        # 🚦 日志级别
+        c_err = "#F92672" if is_dark_mode else "#C82829"  # 报错：玫红色 (极高对比度)
+        c_warn = "#E6DB74" if is_dark_mode else "#EAB700"  # 警告：亮黄色
+        c_info = "#66D9EF" if is_dark_mode else "#3E999F"  # 正常：亮青色
+
+        # 🕒 时间戳与调试：正宗的高级灰，不抢戏，看得清
+        c_dbg = "#8A8A8A" if is_dark_mode else "#8E908C"
+        c_time = "#8A8A8A" if is_dark_mode else "#8E908C"
+
+        # 1. 🔢 基础值类型 (整数、浮点数)
+        # 稍微收紧了数字匹配规则，防止误杀
+        self.rules.append((QRegularExpression(r"\b[-+]?\d*\.?\d+\b"), create_format(c_num)))
+
+        # 2. 📝 字符串提取
+        self.rules.append((QRegularExpression(r'"[^"]*"'), create_format(c_str)))
+        self.rules.append((QRegularExpression(r"'[^']*'"), create_format(c_str)))
+
+        # 3. 🌐 网络标识特征
+        self.rules.append((QRegularExpression(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), create_format(c_net, True)))
+        self.rules.append(
+            (QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b"), create_format(c_net, True)))
+
+        # 4. 🚦 日志级别与业务状态关键字
+        self.rules.append((QRegularExpression(r"(?i)\b(error|fail|failed|fatal|exception|timeout|异常|失败)\b"),
+                           create_format(c_err, True)))
+        self.rules.append((QRegularExpression(r"(?i)\b(warn|warning|警告)\b"), create_format(c_warn, True)))
+        self.rules.append((QRegularExpression(r"(?i)\b(info|success|ok|成功|完成)\b"), create_format(c_info, True)))
+        self.rules.append((QRegularExpression(r"(?i)\b(debug|trace|调试)\b"), create_format(c_dbg, False, True)))
+
+        # 5. 🕒 终极时间戳嗅探 (极其重要：去掉 ^ 限制，精确捕获所有时间格式！)
+        # 只要代码走到这里，一旦识别出是时间，立刻用“灰色”强制覆盖掉前面的“紫色”
+        time_regex = r"\[\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\]|\[\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\]|\b\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b|\b\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\b"
+        self.rules.append((QRegularExpression(time_regex), create_format(c_time)))
+
+        # 6. ⚙️ 用户自定义规则 (保证最高优先级)
+        import os, json
         if os.path.exists("highlight_rules.json"):
             try:
                 with open("highlight_rules.json", "r", encoding="utf-8") as f:
                     custom_rules = json.load(f)
                     for r in custom_rules:
-                        fmt = QTextCharFormat()
-                        fmt.setForeground(QColor(r.get('color', '#FFFFFF')))
-                        if r.get('bold'): fmt.setFontWeight(QFont.Weight.Bold)
+                        fmt = create_format(r.get('color', '#FFFFFF'), r.get('bold', False))
                         self.rules.append((QRegularExpression(r['regex']), fmt))
             except:
                 pass
@@ -141,16 +241,18 @@ class LogHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text):
         import re
 
+        # --- 第一步：执行智能语义和自定义正则表达式渲染 ---
         for pattern, format in self.rules:
             match_iterator = pattern.globalMatch(text)
             while match_iterator.hasNext():
                 match = match_iterator.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), format)
 
+        # --- 第二步：定向追踪通信方向 (保留原有的上下行 HEX 特色) ---
         is_tx = re.search(r"(?i)(nb_send|send|发送|\[上行\])", text)
         is_rx = re.search(r"(?i)(nb_recv|recv|接收|\[下行\])", text)
 
-        # HEX 狙击
+        # 精准狙击连续的 HEX 数据流 (必须出现3个以上的HEX字符组)
         hex_pattern = QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[\s\-]+){3,}[0-9a-fA-F]{2}\b")
         hex_iterator = hex_pattern.globalMatch(text)
         while hex_iterator.hasNext():
@@ -158,39 +260,25 @@ class LogHighlighter(QSyntaxHighlighter):
             hex_fmt = QTextCharFormat()
             hex_fmt.setFontWeight(QFont.Weight.Bold)
             if is_tx:
-                hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))
+                hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))  # 上行专属蓝
             elif is_rx:
-                hex_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))
+                hex_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))  # 下行专属黄
             else:
-                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))
+                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))  # 未知通信专属紫
             self.setFormat(match.capturedStart(), match.capturedLength(), hex_fmt)
 
-        # JSON 狙击
-        json_pattern = QRegularExpression(r"\{.*?\}")
-        json_iterator = json_pattern.globalMatch(text)
-        while json_iterator.hasNext():
-            match = json_iterator.next()
-            json_fmt = QTextCharFormat()
-            json_fmt.setFontWeight(QFont.Weight.Bold)
-            if is_tx:
-                json_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))
-            elif is_rx:
-                json_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))
-            else:
-                json_fmt.setForeground(QColor("#10B981") if self.is_dark else QColor("#059669"))
-            self.setFormat(match.capturedStart(), match.capturedLength(), json_fmt)
-
-        # 🌟 全局搜索词荧光铺底
+        # --- 第三步：全局搜索结果绝对置顶 (不受任何其它颜色影响) ---
         if self.search_keyword:
             search_pattern = QRegularExpression(QRegularExpression.escape(self.search_keyword),
                                                 QRegularExpression.PatternOption.CaseInsensitiveOption)
             search_iterator = search_pattern.globalMatch(text)
             search_fmt = QTextCharFormat()
+
             if self.is_dark:
-                search_fmt.setBackground(QColor("#00BFFF"))
+                search_fmt.setBackground(QColor("#39FF14"))  # 深色模式：荧光绿底漆
                 search_fmt.setForeground(QColor("#000000"))
             else:
-                search_fmt.setBackground(QColor("#4ADE80"))
+                search_fmt.setBackground(QColor("#F472B6"))  # 浅色模式：猛男粉底漆
                 search_fmt.setForeground(QColor("#000000"))
 
             while search_iterator.hasNext():
@@ -213,6 +301,17 @@ class TerminalTextEdit(QTextEdit):
         self.setReadOnly(True)
         self.document().setMaximumBlockCount(50000)
         self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
+
+        # ==========================================
+        # 🌟 新增：致敬 WindTerm 画板底色与默认字体颜色
+        # ==========================================
+        self.setStyleSheet("""
+            QTextEdit {
+                background-color: #1C1C1C; /* WindTerm 灵魂高级灰背景 */
+                color: #F8F8F2;            /* WindTerm 柔和珍珠白文字 */
+                border: none;              /* 去除多余边框更清爽 */
+            }
+        """)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -661,6 +760,8 @@ class FrameTableModel(QAbstractTableModel):
 
     def update_data(self, new_data):
         self.beginResetModel()
+        # 🌟 关键修复：加上 [:] 进行浅拷贝，强行切断与主界面的内存指针绑定！
+        # 这样无论主界面怎么过滤，表格底层的列表永远是独立安全的。
         self._data = new_data[:]
         self.endResetModel()
 
@@ -685,11 +786,155 @@ class FrameTableModel(QAbstractTableModel):
             frame = self._data[index.row()]
             col = index.column()
             f_data = frame['data']
+
+            direction = frame.get('direction', '')
+            is_xiaoan = False
+            msg_0x00 = self.get_msg_name('0x00')
+            if '透传' in msg_0x00 or 'WILD' in msg_0x00: is_xiaoan = True
+
             if col == 0: return str(frame['seq'])
             if col == 1: return str(f_data.get('time', f_data.get('timestamp', 'N/A')))
             if col == 2: return frame['type']
-            if col == 3: return self.get_msg_name(frame['type']).split('(')[0]
-            if col == 4: return json.dumps(f_data, ensure_ascii=False)[:60] + "..."
+
+            if col == 3:
+                msg_type = frame['type']
+                base_name = self.get_msg_name(msg_type).split('(')[0]
+                if not is_xiaoan:
+                    if msg_type in ('0x08', '0x28'):
+                        ack_type = f_data.get('ack_msg_type')
+                        prefix = "终端应答" if msg_type == '0x08' else "平台应答"
+                        if ack_type:
+                            ack_type_hex = f"0x{str(ack_type).upper()}"
+                            ack_name = self.get_msg_name(ack_type_hex).split('(')[0]
+                            return f"{prefix} ({ack_name})"
+                        return f"通用{prefix}"
+                    return base_name
+                else:
+                    if '下行' in direction and msg_type != '0x00': return f"平台回复 ({base_name})"
+                    return base_name
+
+            if col == 4:
+                msg_type = frame['type']
+                if not is_xiaoan:
+                    if msg_type in ('0x08', '0x28'):
+                        ack_type = f_data.get('ack_msg_type')
+                        prefix = "终端应答" if msg_type == '0x08' else "平台应答"
+                        if ack_type:
+                            ack_type_hex = f"0x{str(ack_type).upper()}"
+                            ack_name = self.get_msg_name(ack_type_hex).split('(')[0]
+                            err_code = f_data.get('error_code')
+                            if err_code and "成功" not in str(err_code) and str(err_code) != "0":
+                                return f"[ACK] ❌ {prefix} ({ack_name}) [{err_code}]"
+                            else:
+                                return f"[ACK] ✅ {prefix} ({ack_name})"
+                        return f"[ACK] ✅ 通用{prefix}"
+
+                    if '下行' in direction:
+                        base_name = self.get_msg_name(msg_type).split('(')[0]
+                        summary = [f"{direction} 📥 {base_name}"]
+                        params = []
+                        for k, v in f_data.items():
+                            if k not in ('time', 'timestamp', 'seq', '_note'): params.append(f"{k}:{v}")
+                        if params: summary.append(f"({', '.join(params)})")
+                        return " ".join(summary)
+
+                else:
+                    if '下行' in direction and msg_type != '0x00':
+                        base_name = self.get_msg_name(msg_type).split('(')[0]
+                        if msg_type == '0x23' and 'raw_body' in f_data:
+                            import struct, binascii
+                            try:
+                                raw_hex = f_data['raw_body']
+                                if len(raw_hex) == 8:
+                                    ts = struct.unpack('>I', binascii.unhexlify(raw_hex))[0]
+                                    return f"[ACK] ✅ {base_name} (平台同步时间戳: {ts})"
+                            except:
+                                pass
+                        return f"[ACK] ✅ {base_name}"
+
+                    if '下行' in direction and msg_type == '0x00':
+                        summary = [f"{direction} 📥 透传命令"]
+                        json_str = f_data.get('json_data', '')
+                        if json_str: summary.append(f"📜 {json_str}")
+                        return " ".join(summary)
+
+                summary = []
+                if direction: summary.append(f"{direction}")
+
+                if msg_type == '0x00':
+                    json_str = f_data.get('json_data', '')
+                    if json_str: summary.append(f"📜 {json_str}")
+                elif msg_type == '0x05':
+                    alarm = f_data.get('alarm_type')
+                    if alarm: summary.append(f"🚨 {alarm}")
+                elif msg_type in ('0x34', '0x48'):
+                    evt_type = f_data.get('type')
+                    if evt_type: summary.append(f"📢 事件: {evt_type}")
+                elif msg_type == '0x46':
+                    faults = []
+                    for k, v in f_data.items():
+                        if str(k).startswith("Bit") and str(v) not in ("正常", "0", 0):
+                            fault_name = k.split('_')[-1] if '_' in k else k
+                            faults.append(f"{fault_name}:{v}")
+                    if faults:
+                        summary.append(f"🛠️ 故障: {'/'.join(faults)}")
+                    else:
+                        summary.append("✅ 全部正常")
+                elif msg_type in ('0x44', '0x29'):
+                    lat = f_data.get('latitude')
+                    lon = f_data.get('longitude')
+                    ts = f_data.get('timestamp')
+                    if lon is not None and lat is not None: summary.append(f"📍 {lon}, {lat}")
+                    if ts is not None: summary.append(f"🕒 {ts}")
+                    if 'voltage' in f_data: summary.append(f"V:{f_data['voltage']}")
+                    if 'SOC' in f_data:
+                        summary.append(f"SOC:{f_data['SOC']}")
+                    elif '电池SOC' in f_data:
+                        summary.append(f"SOC:{f_data['电池SOC']}")
+
+                elif 'alarm_bits' in f_data:
+                    active_alarms = []
+                    for alarm_name, is_active in f_data['alarm_bits'].items():
+                        if is_active == 1: active_alarms.append(alarm_name)
+                    if active_alarms: summary.append(f"🚨告警: {'/'.join(active_alarms)}")
+                elif msg_type == '0x5C':
+                    faults = []
+                    fault_keys = ["Bit0_堵转", "Bit1_转把", "Bit2_欠压", "Bit3_过压", "Bit4_刹车", "Bit5_霍尔"]
+                    for fk in fault_keys:
+                        val = f_data.get(fk)
+                        if val and val not in ("正常", 0, "0"): faults.append(str(val))
+                    if faults:
+                        summary.append(f"🛠️故障: {'/'.join(faults)}")
+                    else:
+                        summary.append("✅无故障")
+                else:
+                    if 'voltage' in f_data: summary.append(f"V:{f_data['voltage']}")
+                    if 'SOC' in f_data:
+                        summary.append(f"SOC:{f_data['SOC']}")
+                    elif '电池SOC' in f_data:
+                        summary.append(f"SOC:{f_data['电池SOC']}")
+
+                if msg_type == '0x52':
+                    pt1_lat = f_data.get('pt1_lat')
+                    pt1_lng = f_data.get('pt1_lng')
+                    pt1_time = f_data.get('pt1_time')
+                    sat_count = f_data.get('sat_count')
+                    if pt1_lng is not None and pt1_lat is not None: summary.append(f"📍 {pt1_lng}, {pt1_lat}")
+                    if pt1_time is not None: summary.append(f"🕒 {pt1_time}")
+                    if sat_count is not None: summary.append(f"🛰️ {sat_count}星")
+                    total_pts = 0
+                    if pt1_lat is not None: total_pts = 1
+                    if 'point_list' in f_data: total_pts += len(f_data['point_list'])
+                    summary.append(f"(共 {total_pts} 个点)")
+                else:
+                    lat_val = f_data.get('lat')
+                    total_pts = 0
+                    if lat_val is not None: total_pts = 1
+                    if 'point_list' in f_data: total_pts += len(f_data['point_list'])
+                    if total_pts > 0: summary.append(f"共包含 {total_pts} 个定位点")
+
+                if 'health' in f_data: summary.append(f"健康度:{f_data['health']}%")
+                return " ".join(summary) if summary else "无摘要"
 
     def get_msg_name(self, hex_type):
         return "详情见下"
@@ -728,6 +973,7 @@ class EcuMainWindow(QMainWindow):
 
         # 顶部工具栏
         top_bar_layout = QHBoxLayout()
+        top_bar_layout.setContentsMargins(0, 0, 0, 0)  # 🌟 强行清空顶部默认边距，确立绝对左边缘！
         top_bar_layout.addWidget(QLabel("端口:"))
         self.combo_port = AutoRefreshComboBox(self)
         self.combo_port.setMinimumWidth(80)
@@ -785,6 +1031,8 @@ class EcuMainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         term_toolbar = QHBoxLayout()
+        term_toolbar.setContentsMargins(0, 0, 0, 0)  # 🌟 强行清空下方边距，与上方完美垂直对齐！
+
         # ==========================================
         # 🌟 极简专业工具栏 (状态按钮 + 折叠菜单)
         # ==========================================
@@ -803,33 +1051,25 @@ class EcuMainWindow(QMainWindow):
         self.btn_search_next.setToolTip("向下查找")
         self.btn_search_next.clicked.connect(self.search_next)
 
-        # 🌟 状态按钮 1：替代原本的过滤 CheckBox
         self.cb_filter_mode = QPushButton("🎯 过滤")
-        self.cb_filter_mode.setCheckable(True)  # 开启状态保持功能
+        self.cb_filter_mode.setCheckable(True)
         self.cb_filter_mode.setToolTip("开启/关闭仅显匹配行")
         self.cb_filter_mode.toggled.connect(self.apply_log_filter)
 
-        # 弹簧将左右隔开
-        term_toolbar.addStretch()
-
-        # 🌟 状态按钮 2：替代原本的时间戳 CheckBox
         self.cb_timestamp = QPushButton("⏱️ 时戳")
         self.cb_timestamp.setCheckable(True)
         self.cb_timestamp.setChecked(True)
         self.cb_timestamp.setToolTip("开启/关闭时间戳注入")
 
-        # 🌟 状态按钮 3：替代原本的自动滚动 CheckBox
         self.cb_auto_scroll = QPushButton("⏬ 滚动")
         self.cb_auto_scroll.setCheckable(True)
         self.cb_auto_scroll.setChecked(True)
         self.cb_auto_scroll.setToolTip("弹起以冻结视口，按下恢复自动滚动")
 
-        # 极简清空按钮 (仅保留图标)
         self.btn_clear_term = QPushButton("🗑️")
         self.btn_clear_term.setToolTip("清空控制台日志")
         self.btn_clear_term.clicked.connect(self.clear_all_data)
 
-        # 🌟 终极收纳：将低频操作折叠进“⋮ 更多”菜单
         self.btn_more = QPushButton("⋮ 更多")
         more_menu = QMenu(self)
 
@@ -839,23 +1079,26 @@ class EcuMainWindow(QMainWindow):
         self.action_record = more_menu.addAction("⏺️ 开始实时录制")
         self.action_record.triggered.connect(self.toggle_recording)
 
-        more_menu.addSeparator()  # 分割线
+        more_menu.addSeparator()
 
         action_regex = more_menu.addAction("⚙️ 自定义高亮配置")
         action_regex.triggered.connect(self.open_regex_config)
 
         self.btn_more.setMenu(more_menu)
 
-        # 依次加入布局
+        # 🌟 按照从左到右的顺序，依次加入布局
         term_toolbar.addWidget(self.search_input)
         term_toolbar.addWidget(self.btn_search_prev)
         term_toolbar.addWidget(self.btn_search_next)
         term_toolbar.addWidget(self.cb_filter_mode)
-        # --- 弹簧在这中间 ---
         term_toolbar.addWidget(self.cb_timestamp)
         term_toolbar.addWidget(self.cb_auto_scroll)
         term_toolbar.addWidget(self.btn_clear_term)
         term_toolbar.addWidget(self.btn_more)
+
+        # 🚨 终极修复：把弹簧加在【所有按钮的最后面】！
+        # 这样不管你怎么放大窗口，巨大的弹簧都在右侧，把所有按钮死死顶在左边！
+        term_toolbar.addStretch()
 
         left_layout.addLayout(term_toolbar)
 
@@ -1026,24 +1269,32 @@ class EcuMainWindow(QMainWindow):
         for p in ports: self.combo_port.addItem(f"{p.device}", p.device)
 
     def toggle_serial(self):
-        if self.serial_worker and self.serial_worker.isRunning():
-            self.serial_worker.stop()
-            self.btn_serial_toggle.setText("🔌 打开")
-            self.btn_serial_toggle.setStyleSheet("")
-            self.combo_port.setEnabled(True)
-            self.combo_baud.setEnabled(True)
-            self.statusBar().showMessage("状态: 串口已关闭")
-            self.current_log_filename = None
+        # 🌟 修复核心：不再依赖虚无缥缈的线程状态，而是直接根据按钮文字判断用户意图
+        if self.btn_serial_toggle.text() == "🛑 停止" or self.btn_serial_toggle.text() == "关闭中...":
+            if self.serial_worker:
+                self.serial_worker.stop()
+                self.btn_serial_toggle.setText("关闭中...")
+                self.btn_serial_toggle.setEnabled(False)  # 临时禁用防连击，等待线程安全释放
         else:
             port = self.combo_port.currentData()
             baud = self.combo_baud.currentText()
-            if not port: return
+            if not port:
+                QMessageBox.warning(self, "提示", "无可用的串口，请检查设备连接！")
+                return
+
             self.rt_tx_parser = StreamParser(self.decoder)
             self.rt_rx_parser = StreamParser(self.decoder)
             self.serial_buffer_line = ""
 
             self.serial_worker = SerialWorker(port, int(baud))
             self.serial_worker.data_received.connect(self.on_serial_data_received)
+
+            # ==========================================
+            # 🌟 关键修复：把底层的异常和退出信号接到 UI 上！
+            # ==========================================
+            self.serial_worker.error_occurred.connect(self.on_serial_error)
+            self.serial_worker.finished_signal.connect(self.on_serial_finished)
+
             self.serial_worker.start()
 
             self.btn_serial_toggle.setText("🛑 停止")
@@ -1051,6 +1302,24 @@ class EcuMainWindow(QMainWindow):
             self.combo_port.setEnabled(False)
             self.combo_baud.setEnabled(False)
             self.statusBar().showMessage(f"状态: 正在监听 {port} ({baud}bps)")
+
+    # ==========================================
+    # 🌟 新增配套方法 1：弹窗提示底层报错，不再静默假死
+    # ==========================================
+    def on_serial_error(self, err_msg):
+        QMessageBox.critical(self, "串口异常", f"串口连接断开或被占用：\n{err_msg}")
+
+    # ==========================================
+    # 🌟 新增配套方法 2：绝对安全的 UI 状态重置 (无论正常关闭还是异常断开都会触发)
+    # ==========================================
+    def on_serial_finished(self):
+        self.btn_serial_toggle.setText("🔌 打开")
+        self.btn_serial_toggle.setStyleSheet("")
+        self.btn_serial_toggle.setEnabled(True)
+        self.combo_port.setEnabled(True)
+        self.combo_baud.setEnabled(True)
+        self.statusBar().showMessage("状态: 串口已安全关闭")
+        self.current_log_filename = None
 
     def append_raw_log(self, text):
         if self.cb_timestamp.isChecked():
@@ -1183,8 +1452,11 @@ class EcuMainWindow(QMainWindow):
         self.serial_buffer_line = ""
 
     def populate_protocols(self):
-        json_files = [f for f in os.listdir('.') if f.endswith('.json')]
-        for jf in json_files: self.combo_protocol.addItem(jf, jf)
+        self.combo_protocol.clear() # 防错机制：先清空原有列表
+        # 🌟 修复：扫描 JSON 时，强制排除掉高亮配置文件
+        json_files = [f for f in os.listdir('.') if f.endswith('.json') and f != "highlight_rules.json"]
+        for jf in json_files:
+            self.combo_protocol.addItem(jf, jf)
 
     def change_protocol(self):
         protocol_file = self.combo_protocol.currentData()
@@ -1264,12 +1536,30 @@ class EcuMainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def apply_terminal_style(self):
-        if self.is_dark_mode:
-            self.raw_log_console.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; border: 1px solid #43454a;")
-        else:
-            self.raw_log_console.setStyleSheet("background-color: #FAFAFA; color: #24292E; border: 1px solid #d1d5db;")
-        if hasattr(self.raw_log_console, 'highlighter'):
-            self.raw_log_console.highlighter.update_theme(self.is_dark_mode)
+        # 确保 raw_log_console 存在
+        if hasattr(self, 'raw_log_console') and self.raw_log_console:
+            if self.is_dark_mode:
+                # 🌟 深色模式：应用 WindTerm 灵魂配色 (高级灰底 + 珍珠白字)
+                self.raw_log_console.setStyleSheet("""
+                            QTextEdit {
+                                background-color: #1C1C1C; 
+                                color: #F8F8F2; 
+                                border: none;
+                            }
+                        """)
+            else:
+                # ☀️ 浅色模式：经典的白底黑字 (或是浅灰底色)
+                self.raw_log_console.setStyleSheet("""
+                            QTextEdit {
+                                background-color: #FFFFFF; 
+                                color: #333333; 
+                                border: none;
+                            }
+                        """)
+
+            # 🌟 最关键的一步：通知底层高亮引擎切换配色方案！
+            if hasattr(self.raw_log_console, 'highlighter'):
+                self.raw_log_console.highlighter.update_theme(self.is_dark_mode)
 
     def get_light_qss(self):
         return """
