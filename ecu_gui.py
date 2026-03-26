@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem)
 from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QFont, QTextCursor,
                          QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, QRegularExpression
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, QRegularExpression, QTimer
 
 
 # ==========================================
@@ -280,7 +280,7 @@ class LogHighlighter(QSyntaxHighlighter):
         while hex_iterator.hasNext():
             match = hex_iterator.next()
             hex_fmt = QTextCharFormat()
-            hex_fmt.setFontWeight(QFont.Weight.Bold)
+            #hex_fmt.setFontWeight(QFont.Weight.Bold)
             if is_tx:
                 hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))  # 上行专属蓝
             elif is_rx:
@@ -302,11 +302,14 @@ class LogHighlighter(QSyntaxHighlighter):
 
                 search_fmt = QTextCharFormat()
                 if self.is_dark:
-                    search_fmt.setBackground(QColor("#39FF14"))
-                    search_fmt.setForeground(QColor("#000000"))
+                    search_fmt.setBackground(QColor("#2E6A41"))
+                    search_fmt.setForeground(QColor("#FFFFFF"))
                 else:
                     search_fmt.setBackground(QColor("#F472B6"))
                     search_fmt.setForeground(QColor("#000000"))
+
+                # 🌟 为高亮文字增加加粗效果
+                search_fmt.setFontWeight(QFont.Weight.Bold)
 
                 while search_iterator.hasNext():
                     match = search_iterator.next()
@@ -989,6 +992,12 @@ class EcuMainWindow(QMainWindow):
         self.is_recording = False
         self.record_filename = ""
 
+        # 🌟 新增：防抖定时器与状态记忆
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)  # 设置为单次触发
+        self.search_timer.timeout.connect(self._on_search_timer_timeout)
+        self.last_search_text = ""
+
         self.init_ui()
 
     def init_ui(self):
@@ -1069,6 +1078,8 @@ class EcuMainWindow(QMainWindow):
         self.search_input.setPlaceholderText("🔍 搜索...")
         self.search_input.setMaximumWidth(140)
         self.search_input.returnPressed.connect(self.search_next)
+        # 🌟 在下面新增一行 textChanged 的绑定：
+        self.search_input.textChanged.connect(self.on_search_text_changed)
 
         self.btn_search_prev = QPushButton("⬆️")
         self.btn_search_prev.setToolTip("向上查找")
@@ -1131,6 +1142,10 @@ class EcuMainWindow(QMainWindow):
 
         self.raw_log_console = TerminalTextEdit(self)
         left_layout.addWidget(self.raw_log_console)
+        # ==========================================
+        # 🌟 新增：监听垂直滚动条的数值变化，实现触底自动恢复滚动
+        # ==========================================
+        self.raw_log_console.verticalScrollBar().valueChanged.connect(self._on_log_scrollbar_changed)
         main_splitter.addWidget(left_widget)
 
         # 右侧解析详情
@@ -1155,6 +1170,8 @@ class EcuMainWindow(QMainWindow):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.horizontalHeader().setStretchLastSection(True)
+        # 🌟 增加这一行：开启表格隔行变色（斑马线效果）
+        self.table_view.setAlternatingRowColors(True)
         self.table_view.clicked.connect(self.on_row_clicked)
         right_top_layout.addWidget(self.table_view)
         right_splitter.addWidget(right_top_widget)
@@ -1178,6 +1195,21 @@ class EcuMainWindow(QMainWindow):
         self.change_protocol()
         self.setStyleSheet(self.get_dark_qss())
         self.apply_terminal_style()
+
+    def _on_log_scrollbar_changed(self, value):
+        scrollbar = self.raw_log_console.verticalScrollBar()
+
+        # 获取当前滚动条的最大值
+        max_value = scrollbar.maximum()
+
+        # 💡 核心逻辑：如果当前值等于最大值，说明用户把日志拉到了最底下
+        # 并且 max_value > 0 防止刚启动没有任何日志时误触发
+        if value == max_value and max_value > 0:
+            # 如果此时“自动滚动”按钮是弹起（关闭）状态，就帮用户自动按下（开启）
+            if not self.cb_auto_scroll.isChecked():
+                self.cb_auto_scroll.setChecked(True)
+                # 可选：如果你想给用户一个视觉反馈，可以在状态栏提示一下
+                # self.statusBar().showMessage("⏬ 已触底，自动恢复实时滚动", 2000)
 
     # ==========================================
     # 🌟 搜索/雷达与过滤核心逻辑
@@ -1211,17 +1243,44 @@ class EcuMainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("🌐 恢复显示全部日志")
 
+    # ==========================================
+    # 🌟 自动搜索防抖逻辑
+    # ==========================================
+    def on_search_text_changed(self, text):
+        # 1. 只要用户还在打字，就立刻停掉之前的倒计时
+        self.search_timer.stop()
+
+        # 2. 如果关键字被清空了，不需要等，立刻执行一次清理
+        if not text:
+            self.last_search_text = ""
+            self._execute_search(backward=False)
+            return
+
+        # 3. 停下手 300 毫秒后，触发真正的搜索 (可根据手速调整，300是黄金手感)
+        self.search_timer.start(1000)
+
+    def _on_search_timer_timeout(self):
+        keyword = self.search_input.text()
+
+        if keyword == self.last_search_text:
+            return
+        self.last_search_text = keyword
+
+        # 🌟 核心修改：传入 is_typing_auto=True 标识这是打字触发的
+        # 不再通过光标 movePosition(Start) 干扰视口
+        self._execute_search(backward=False, is_typing_auto=True)
+
     def search_next(self):
         self._execute_search(backward=False)
 
     def search_prev(self):
         self._execute_search(backward=True)
 
-    def _execute_search(self, backward=False):
+    def _execute_search(self, backward=False, is_typing_auto=False):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         keyword = self.search_input.text()
 
-        # 1. 触发背景高亮
+        # 触发背景全局高亮 (LogHighlighter 会自动给屏幕上的关键字上色)
         if hasattr(self.raw_log_console, 'highlighter'):
             self.raw_log_console.highlighter.set_search_keyword(keyword)
 
@@ -1229,6 +1288,21 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setExtraSelections([])
             self.raw_log_console.minimap_highlights.clear()
             self.raw_log_console.viewport().update()
+            return
+
+        # ==========================================================
+        # 🌟 2. 核心拦截：如果是“边打字边触发”的自动搜索
+        # ==========================================================
+        if is_typing_auto:
+            self.raw_log_console.setExtraSelections([])  # 清除之前跳转留下的橙色方块
+
+            # 仅仅更新雷达图 (如果您之前封装了 _update_minimap_internal，在这里调用)
+            if hasattr(self, '_update_minimap_internal'):
+                self._update_minimap_internal(keyword)
+
+            self.raw_log_console.viewport().update()  # 刷新界面显示高亮
+
+            # 🚀 直接结束！不执行 find()，不抢夺焦点，不冻结滚动！
             return
 
         # ==========================================================
@@ -1599,42 +1673,71 @@ class EcuMainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def apply_terminal_style(self):
-        # 确保 raw_log_console 存在
         if hasattr(self, 'raw_log_console') and self.raw_log_console:
             if self.is_dark_mode:
-                # 🌟 深色模式：应用 PyCharm Darcula 配色
                 self.raw_log_console.setStyleSheet("""
-                                    QTextEdit {
-                                        background-color: #2B2B2B; 
-                                        color: #A9B7C6; 
-                                        border: none;
-                                    }
-                                """)
+                    QTextEdit {
+                        background-color: #2B2B2B; 
+                        color: #A9B7C6; 
+                        border: none;
+                    }
+                """)
             else:
-                # ☀️ 浅色模式：经典的白底黑字 (或是浅灰底色)
+                # ☀️ 浅色模式护眼优化：使用“柔和灰白”代替纯白，使用“深灰”代替纯黑
                 self.raw_log_console.setStyleSheet("""
-                                    QTextEdit {
-                                        background-color: #FFFFFF; 
-                                        color: #333333; 
-                                        border: none;
-                                    }
-                                """)
+                    QTextEdit {
+                        background-color: #F6F8FA; /* 极浅的护眼冷灰，降低反光率 */
+                        color: #24292E;            /* 柔和的深灰蓝，避免高反差刺眼 */
+                        border: none;
+                    }
+                """)
 
-            # 🌟 最关键的一步：通知底层高亮引擎切换配色方案！
             if hasattr(self.raw_log_console, 'highlighter'):
                 self.raw_log_console.highlighter.update_theme(self.is_dark_mode)
 
     def get_light_qss(self):
         return """
-        QWidget { background-color: #f3f4f6; color: #1f2937; font-family: "Microsoft YaHei", "Segoe UI"; }
-        QLineEdit, QTextEdit, QComboBox, QCheckBox { background-color: #ffffff; color: #1f2937; border: 1px solid #d1d5db; border-radius: 4px; padding: 4px; }
-        QPushButton { background-color: #ffffff; color: #374151; border: 1px solid #d1d5db; border-radius: 4px; padding: 4px 8px; }
-        QPushButton:hover { background-color: #e5e7eb; color: #111827; }
-        /* 🌟 核心：按钮被按下的高亮状态 */
-        QPushButton:checked { background-color: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; font-weight: bold; }
-        QTableView { background-color: #ffffff; color: #1f2937; gridline-color: #e5e7eb; border: 1px solid #d1d5db; selection-background-color: #3b82f6; selection-color: #ffffff; alternate-background-color: #f9fafb; }
-        QTreeView { background-color: #ffffff; color: #1f2937; border: 1px solid #d1d5db; selection-background-color: #3b82f6; selection-color: #ffffff; }
-        QHeaderView::section { background-color: #f3f4f6; color: #374151; border: none; border-right: 1px solid #d1d5db; border-bottom: 1px solid #d1d5db; padding: 4px; font-weight: bold; }
+        /* 主窗口背景：稍微深一点的浅灰色，突出前面的控件 */
+        QWidget { background-color: #EBEDF0; color: #24292E; font-family: "Microsoft YaHei", "Segoe UI"; }
+
+        /* 输入框、下拉框等交互组件：使用柔和灰白 */
+        QLineEdit, QTextEdit, QComboBox, QCheckBox { background-color: #F6F8FA; color: #24292E; border: 1px solid #D0D7DE; border-radius: 4px; padding: 4px; }
+
+        /* 按钮使用非常淡的灰白色，悬浮时加深 */
+        QPushButton { background-color: #F6F8FA; color: #24292E; border: 1px solid #D0D7DE; border-radius: 4px; padding: 4px 8px; }
+        QPushButton:hover { background-color: #F3F4F6; color: #0969DA; border: 1px solid #0969DA; }
+        QPushButton:checked { background-color: #DDEBFD; color: #0969DA; border: 1px solid #0969DA; font-weight: bold; }
+
+        /* 🌟 右侧流水线表格：浅灰白底色，配合淡淡的斑马纹 */
+        QTableView { 
+            background-color: #F6F8FA; 
+            color: #24292E; 
+            gridline-color: #D0D7DE; 
+            border: 1px solid #D0D7DE; 
+            selection-background-color: #0969DA; 
+            selection-color: #FFFFFF; 
+            alternate-background-color: #F0F3F6; /* 淡淡的隔行变色 */
+        }
+
+        /* 🌟 字段解析树状图 */
+        QTreeView { 
+            background-color: #F6F8FA; 
+            color: #24292E; 
+            border: 1px solid #D0D7DE; 
+            selection-background-color: #0969DA; 
+            selection-color: #FFFFFF; 
+        }
+
+        /* 表头：底色加深一点点，形成视觉分层 */
+        QHeaderView::section { 
+            background-color: #EBEDF0; 
+            color: #57606A; 
+            border: none; 
+            border-right: 1px solid #D0D7DE; 
+            border-bottom: 1px solid #D0D7DE; 
+            padding: 4px; 
+            font-weight: bold; 
+        }
         """
 
     def get_dark_qss(self):
@@ -1643,10 +1746,32 @@ class EcuMainWindow(QMainWindow):
         QLineEdit, QTextEdit, QComboBox, QCheckBox { background-color: #1e1f22; color: #a9b7c6; border: 1px solid #43454a; border-radius: 4px; padding: 4px; }
         QPushButton { background-color: #36393f; color: #a9b7c6; border: 1px solid #43454a; border-radius: 4px; padding: 4px 8px; }
         QPushButton:hover { background-color: #43454a; color: #ffffff; }
-        /* 🌟 核心：深色模式按钮被按下的高亮状态 */
         QPushButton:checked { background-color: #1e3a8a; color: #bfdbfe; border: 1px solid #3b82f6; font-weight: bold; }
-        QTableView { background-color: #1e1f22; color: #a9b7c6; gridline-color: #393b40; border: 1px solid #43454a; selection-background-color: #2f65ca; selection-color: #ffffff; }
-        QTreeView { background-color: #1e1f22; color: #a9b7c6; border: 1px solid #43454a; selection-background-color: #2f65ca; selection-color: #ffffff; }
+
+        /* ======================================================== */
+        /* 🌟 修改点 1：解析流水线表格 (PyCharm 通知栏/工具栏经典浅色) */
+        /* ======================================================== */
+        QTableView { 
+            background-color: #3C3F41;  /* 提亮底色，和左侧 #2B2B2B 区分开 */
+            color: #A9B7C6; 
+            gridline-color: #4F5254;    /* 网格线也要相应变浅一点，显得柔和 */
+            border: 1px solid #43454A; 
+            selection-background-color: #2F65CA; 
+            selection-color: #FFFFFF; 
+            alternate-background-color: #414446; /* 💡 隔行变色的浅色底 */
+        }
+
+        /* ======================================================== */
+        /* 🌟 修改点 2：字段解析详情树状图 (保持与表格统一的底色) */
+        /* ======================================================== */
+        QTreeView { 
+            background-color: #3C3F41; 
+            color: #A9B7C6; 
+            border: 1px solid #43454A; 
+            selection-background-color: #2F65CA; 
+            selection-color: #FFFFFF; 
+        }
+
         QHeaderView::section { background-color: #2b2d30; color: #a9b7c6; border: none; border-right: 1px solid #43454a; border-bottom: 1px solid #43454a; padding: 4px; font-weight: bold; }
         """
 
