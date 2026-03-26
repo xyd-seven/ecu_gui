@@ -167,6 +167,8 @@ class LogHighlighter(QSyntaxHighlighter):
     def set_search_keyword(self, keyword):
         if self.search_keyword != keyword:
             self.search_keyword = keyword
+            # 💡 必须恢复 rehighlight()，否则拉到前面或后面一定会漏掉高亮
+            # 别担心，我们在下一步通过“快速跳过”机制来提速
             self.rehighlight()
 
     def update_theme(self, is_dark_mode):
@@ -288,22 +290,27 @@ class LogHighlighter(QSyntaxHighlighter):
             self.setFormat(match.capturedStart(), match.capturedLength(), hex_fmt)
 
         # --- 第三步：全局搜索结果绝对置顶 (不受任何其它颜色影响) ---
-        if self.search_keyword:
-            search_pattern = QRegularExpression(QRegularExpression.escape(self.search_keyword),
-                                                QRegularExpression.PatternOption.CaseInsensitiveOption)
-            search_iterator = search_pattern.globalMatch(text)
-            search_fmt = QTextCharFormat()
+        if self.search_keyword and len(self.search_keyword) >= 2:
+            # 💡 性能优化的核武器：先做简单的字符串包含判断（C级速度）
+            # 只有这行文字真的包含这个词，才启动昂贵的正则引擎
+            if self.search_keyword.lower() in text.lower():
+                search_pattern = QRegularExpression(
+                    QRegularExpression.escape(self.search_keyword),
+                    QRegularExpression.PatternOption.CaseInsensitiveOption
+                )
+                search_iterator = search_pattern.globalMatch(text)
 
-            if self.is_dark:
-                search_fmt.setBackground(QColor("#39FF14"))  # 深色模式：荧光绿底漆
-                search_fmt.setForeground(QColor("#000000"))
-            else:
-                search_fmt.setBackground(QColor("#F472B6"))  # 浅色模式：猛男粉底漆
-                search_fmt.setForeground(QColor("#000000"))
+                search_fmt = QTextCharFormat()
+                if self.is_dark:
+                    search_fmt.setBackground(QColor("#39FF14"))
+                    search_fmt.setForeground(QColor("#000000"))
+                else:
+                    search_fmt.setBackground(QColor("#F472B6"))
+                    search_fmt.setForeground(QColor("#000000"))
 
-            while search_iterator.hasNext():
-                match = search_iterator.next()
-                self.setFormat(match.capturedStart(), match.capturedLength(), search_fmt)
+                while search_iterator.hasNext():
+                    match = search_iterator.next()
+                    self.setFormat(match.capturedStart(), match.capturedLength(), search_fmt)
 
 
 # ==========================================
@@ -1214,7 +1221,7 @@ class EcuMainWindow(QMainWindow):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         keyword = self.search_input.text()
 
-        # 触发底层多级底色渲染
+        # 1. 触发背景高亮
         if hasattr(self.raw_log_console, 'highlighter'):
             self.raw_log_console.highlighter.set_search_keyword(keyword)
 
@@ -1222,63 +1229,99 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setExtraSelections([])
             self.raw_log_console.minimap_highlights.clear()
             self.raw_log_console.viewport().update()
-            if self.cb_filter_mode.isChecked(): self.apply_log_filter()
             return
 
-            # 🌟 更新雷达图 (Minimap) 标记点
-        minimap = []
-        doc = self.raw_log_console.document()
-        block = doc.firstBlock()
-        kw_lower = keyword.lower()
-        while block.isValid():
-            if kw_lower in block.text().lower():
-                minimap.append(block.blockNumber())
-            block = block.next()
-        self.raw_log_console.minimap_highlights = minimap
-        self.raw_log_console.viewport().update()
+        # ==========================================================
+        # 🌟 核心修复：根据“橙色方块”的位置强制跳出
+        # ==========================================================
+        # 即使蓝色选中被清除了，橙色方块（ExtraSelection）还在。
+        # 我们利用它来告诉光标：别在原地打转，往后/往前挪一步再搜！
+        current_extra = self.raw_log_console.extraSelections()
+        physic_cursor = self.raw_log_console.textCursor()
 
-        # 如果开启了过滤模式，立刻执行过滤
-        if self.cb_filter_mode.isChecked(): self.apply_log_filter()
+        if current_extra:
+            # 获取当前显示的那个橙色方块的光标位置
+            last_res_cursor = current_extra[0].cursor
+            if backward:
+                # 向上搜：强制把光标挪到当前橙色块的“左边界”
+                physic_cursor.setPosition(last_res_cursor.selectionStart())
+            else:
+                # 向下搜：强制把光标挪到当前橙色块的“右边界”
+                physic_cursor.setPosition(last_res_cursor.selectionEnd())
+            self.raw_log_console.setTextCursor(physic_cursor)
 
-        # 执行单点高亮跳转
+        # 2. 执行搜索
         options = QTextDocument.FindFlag(0)
-        if backward: options |= QTextDocument.FindFlag.FindBackward
+        if backward:
+            options |= QTextDocument.FindFlag.FindBackward
+
         found = self.raw_log_console.find(keyword, options)
 
+        # 3. 循环搜索逻辑 (Wrap around)
         if not found:
-            cursor = self.raw_log_console.textCursor()
+            loop_cursor = self.raw_log_console.textCursor()
             if backward:
-                cursor.movePosition(QTextCursor.MoveOperation.End)
+                loop_cursor.movePosition(QTextCursor.MoveOperation.End)
             else:
-                cursor.movePosition(QTextCursor.MoveOperation.Start)
-            self.raw_log_console.setTextCursor(cursor)
+                loop_cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self.raw_log_console.setTextCursor(loop_cursor)
             found = self.raw_log_console.find(keyword, options)
-            if not found:
-                self.search_input.setStyleSheet("border: 1px solid #EF4444;")
-                self.raw_log_console.setExtraSelections([])
-            else:
-                self.search_input.setStyleSheet("")
-        else:
-            self.search_input.setStyleSheet("")
 
+        # 4. 处理结果
         if found:
-            extra_selections = []
+            # 拿到新命中的位置
+            new_hit_cursor = self.raw_log_console.textCursor()
+            sel_start = new_hit_cursor.selectionStart()
+            sel_end = new_hit_cursor.selectionEnd()
+
+            # 💡 物理定位：清除蓝色选中，并停留在正确边缘
+            if backward:
+                new_hit_cursor.setPosition(sel_start)
+            else:
+                new_hit_cursor.setPosition(sel_end)
+            self.raw_log_console.setTextCursor(new_hit_cursor)
+
+            # 🎨 渲染新的橙色方块
             selection = QTextEdit.ExtraSelection()
             selection.format.setBackground(QColor("#FF9800"))
             selection.format.setForeground(QColor("#000000"))
-            cursor = self.raw_log_console.textCursor()
-            selection.cursor = QTextCursor(cursor)
-            extra_selections.append(selection)
-            self.raw_log_console.setExtraSelections(extra_selections)
 
-            if backward:
-                cursor.setPosition(cursor.selectionStart())
-            else:
-                cursor.setPosition(cursor.selectionEnd())
-            self.raw_log_console.setTextCursor(cursor)
+            render_cursor = self.raw_log_console.textCursor()
+            render_cursor.setPosition(sel_start)
+            render_cursor.setPosition(sel_end, QTextCursor.MoveMode.KeepAnchor)
+            selection.cursor = render_cursor
 
+            # 更新高亮（这会覆盖旧的橙色方块）
+            self.raw_log_console.setExtraSelections([selection])
+
+            # 滚动与焦点
+            self.raw_log_console.setFocus()
+            self.raw_log_console.ensureCursorVisible()
+            self.search_input.setStyleSheet("")
             if self.cb_auto_scroll.isChecked():
                 self.cb_auto_scroll.setChecked(False)
+        else:
+            self.search_input.setStyleSheet("border: 1px solid #EF4444;")
+            self.raw_log_console.setExtraSelections([])
+
+        self.raw_log_console.viewport().update()
+
+    def _update_minimap_internal(self, keyword):
+        if not keyword:
+            self.raw_log_console.minimap_highlights = []
+            return
+        # 使用 str.find 代替逐行遍历，速度提升百倍
+        text = self.raw_log_console.toPlainText()
+        highlights = []
+        pos = 0
+        # 限制雷达图扫描前100万字，保护大数据量性能
+        if len(text) < 1000000:
+            while True:
+                pos = text.find(keyword, pos)
+                if pos == -1: break
+                highlights.append(self.raw_log_console.document().findBlock(pos).blockNumber())
+                pos += len(keyword)
+        self.raw_log_console.minimap_highlights = list(set(highlights))  # 去重
 
     # ==========================================
     # 其他业务逻辑 (数据接入、文件导出等)
