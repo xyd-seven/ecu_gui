@@ -26,89 +26,105 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, Q
 
 
 # ==========================================
-# 🌟 新增：日志智能高亮引擎 (完美狙击 HEX 数据)
+# 🌟 新增：日志智能高亮引擎 (支持全局搜索多级高亮)
 # ==========================================
 class LogHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark_mode=True):
         super().__init__(document)
         self.rules = []
+        self.search_keyword = ""  # 🌟 新增：记录当前搜索的关键字
         self.is_dark = is_dark_mode
         self.update_theme(is_dark_mode)
+
+    def set_search_keyword(self, keyword):
+        # 🌟 触发器：当用户输入搜索词时，要求底层引擎重新渲染全局
+        if self.search_keyword != keyword:
+            self.search_keyword = keyword
+            self.rehighlight()
 
     def update_theme(self, is_dark_mode):
         self.is_dark = is_dark_mode
         self.rules.clear()
 
-        # 1. 灰蓝色: 时间戳 [13:42:05.123] (弱化视觉干扰)
+        # 1. 灰蓝色: 时间戳
         ts_format = QTextCharFormat()
         ts_format.setForeground(QColor("#9CA3AF") if is_dark_mode else QColor("#6B7280"))
         self.rules.append((QRegularExpression(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]"), ts_format))
 
-        # 2. 亮红色: 错误/异常/超时 (最高警报)
+        # 2. 亮红色: 错误/异常
         err_format = QTextCharFormat()
         err_format.setForeground(QColor("#EF4444") if is_dark_mode else QColor("#DC2626"))
         err_format.setFontWeight(QFont.Weight.Bold)
         self.rules.append((QRegularExpression(r"(?i)(error|fail|timeout|异常|失败)"), err_format))
-
-        self.rehighlight()  # 刷新当前存在的所有文本
+        self.rehighlight()
 
     def highlightBlock(self, text):
         import re
 
-        # 1. 基础关键字与时间戳着色
         for pattern, format in self.rules:
             match_iterator = pattern.globalMatch(text)
             while match_iterator.hasNext():
                 match = match_iterator.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), format)
 
-        # 提取当前行的方向上下文
         is_tx = re.search(r"(?i)(nb_send|send|发送|\[上行\])", text)
         is_rx = re.search(r"(?i)(nb_recv|recv|接收|\[下行\])", text)
 
-        # =========================================================
-        # 2. 🌟 狙击 HEX 数据流 (适用于传统指令)
-        # =========================================================
+        # 狙击 HEX 数据流
         hex_pattern = QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[\s\-]+){3,}[0-9a-fA-F]{2}\b")
         hex_iterator = hex_pattern.globalMatch(text)
-
         while hex_iterator.hasNext():
             match = hex_iterator.next()
             hex_fmt = QTextCharFormat()
-            hex_fmt.setFontWeight(QFont.Weight.Bold)  # 加粗
-
+            hex_fmt.setFontWeight(QFont.Weight.Bold)
             if is_tx:
-                hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))  # 上行蓝
+                hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))
             elif is_rx:
-                hex_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))  # 下行橙
+                hex_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))
             else:
-                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))  # 未知紫
-
+                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))
             self.setFormat(match.capturedStart(), match.capturedLength(), hex_fmt)
 
-        # =========================================================
-        # 3. 🌟 新增：狙击 JSON 字符串 (专为小安透传协议打造！)
-        # =========================================================
-        # 匹配形如 {...} 的 JSON 数据段 (非贪婪匹配，防止跨行误伤)
+        # 狙击 JSON
         json_pattern = QRegularExpression(r"\{.*?\}")
         json_iterator = json_pattern.globalMatch(text)
-
         while json_iterator.hasNext():
             match = json_iterator.next()
             json_fmt = QTextCharFormat()
-            json_fmt.setFontWeight(QFont.Weight.Bold)  # JSON 也加粗显示
-
-            # 为了保持潜意识里的“方向感”，JSON 我们沿用与 HEX 相同的方向色系
-            # 也可以稍微加一点背景色让 JSON 更有结构感（这里我们先用纯色字体）
+            json_fmt.setFontWeight(QFont.Weight.Bold)
             if is_tx:
                 json_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))
             elif is_rx:
                 json_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))
             else:
-                # 如果没有明确方向，JSON 默认用抢眼的翠绿色显示
                 json_fmt.setForeground(QColor("#10B981") if self.is_dark else QColor("#059669"))
-
             self.setFormat(match.capturedStart(), match.capturedLength(), json_fmt)
+
+        # =========================================================
+        # 4. 🌟 终极渲染：全局搜索结果铺底色 (底层无感执行，极其流畅)
+        # =========================================================
+        if self.search_keyword:
+            # 忽略大小写进行匹配
+            search_pattern = QRegularExpression(
+                QRegularExpression.escape(self.search_keyword),
+                QRegularExpression.PatternOption.CaseInsensitiveOption
+            )
+            search_iterator = search_pattern.globalMatch(text)
+
+            search_fmt = QTextCharFormat()
+            # 🌟 设置【全局搜索】的强力高亮底色！
+            if self.is_dark:
+                # 深色模式：极其亮眼的 荧光蓝 (DeepSkyBlue) 底色 + 纯黑字 (对比度拉满)
+                search_fmt.setBackground(QColor("#00BFFF"))
+                search_fmt.setForeground(QColor("#000000"))
+            else:
+                # 浅色模式：极其亮眼的 亮翠绿 底色 + 纯黑字
+                search_fmt.setBackground(QColor("#4ADE80"))
+                search_fmt.setForeground(QColor("#000000"))
+
+            while search_iterator.hasNext():
+                match = search_iterator.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), search_fmt)
 
 # ==========================================
 # 高级 UI 组件: 视口冻结终端
@@ -893,25 +909,45 @@ class EcuMainWindow(QMainWindow):
 
         self.cb_timestamp = QCheckBox("时间戳")
         self.cb_timestamp.setChecked(True)
-        self.cb_auto_scroll = QCheckBox("自动滚动(冻结视口)")
+        self.cb_auto_scroll = QCheckBox("自动滚动")
         self.cb_auto_scroll.setChecked(True)
 
-        # 改个名字更准确：保存当前视图
+        # ==========================================
+        # 🌟 新增：极速搜索框组件 (已修复 import 冲突)
+        # ==========================================
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索关键字 (回车向下)...")
+        self.search_input.setMinimumWidth(180)
+        self.search_input.setMaximumWidth(250)
+        self.search_input.returnPressed.connect(self.search_next)
+
+        self.btn_search_prev = QPushButton("向上")
+        self.btn_search_prev.clicked.connect(self.search_prev)
+
+        self.btn_search_next = QPushButton("向下")
+        self.btn_search_next.clicked.connect(self.search_next)
+
+        # 保存与清空按钮
         self.btn_save_term = QPushButton("💾 保存当前")
         self.btn_save_term.clicked.connect(self.save_raw_log)
 
-        # 🌟 新增：实时录制磁带机按钮
-        self.btn_record = QPushButton("⏺️ 开始录制")
+        self.btn_record = QPushButton("⏺️ 录制")
         self.btn_record.clicked.connect(self.toggle_recording)
 
         self.btn_clear_term = QPushButton("🗑️ 清空")
         self.btn_clear_term.clicked.connect(self.clear_all_data)
 
-        term_toolbar.addStretch()
+        # 将搜索组件放在最左侧，然后加上弹簧把其他按钮挤到右边
+        term_toolbar.addWidget(self.search_input)
+        term_toolbar.addWidget(self.btn_search_prev)
+        term_toolbar.addWidget(self.btn_search_next)
+
+        term_toolbar.addStretch()  # 这个弹簧保持左右排版美观
+
         term_toolbar.addWidget(self.cb_timestamp)
         term_toolbar.addWidget(self.cb_auto_scroll)
         term_toolbar.addWidget(self.btn_save_term)
-        term_toolbar.addWidget(self.btn_record)  # 🌟 塞进布局
+        term_toolbar.addWidget(self.btn_record)
         term_toolbar.addWidget(self.btn_clear_term)
         left_layout.addLayout(term_toolbar)
 
@@ -933,7 +969,7 @@ class EcuMainWindow(QMainWindow):
         table_toolbar.addWidget(QLabel("📊 解析流水线"))
 
         # 🌟 右侧专属的自动滚动复选框
-        self.cb_table_auto_scroll = QCheckBox("自动滚动(冻结视口)")
+        self.cb_table_auto_scroll = QCheckBox("自动滚动")
         self.cb_table_auto_scroll.setChecked(True)
 
         table_toolbar.addStretch()
@@ -1225,6 +1261,83 @@ class EcuMainWindow(QMainWindow):
         self.serial_buffer_line = ""
         self.statusBar().showMessage("状态: 数据已清空")
 
+    # ==========================================
+    # 🌟 新增：日志关键字搜索核心逻辑
+    # ==========================================
+    def search_next(self):
+        self._execute_search(backward=False)
+
+    def search_prev(self):
+        self._execute_search(backward=True)
+
+    def _execute_search(self, backward=False):
+        from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
+        from PyQt6.QtWidgets import QTextEdit
+
+        keyword = self.search_input.text()
+
+        # 1. 触发底层渲染引擎，对【全文档】符合条件的词铺上全局底色
+        if hasattr(self.raw_log_console, 'highlighter'):
+            self.raw_log_console.highlighter.set_search_keyword(keyword)
+
+        if not keyword:
+            self.raw_log_console.setExtraSelections([])  # 清除焦点高亮
+            return
+
+        options = QTextDocument.FindFlag(0)  # 默认不区分大小写
+        if backward:
+            options |= QTextDocument.FindFlag.FindBackward
+
+        found = self.raw_log_console.find(keyword, options)
+
+        # 智能折返逻辑
+        if not found:
+            cursor = self.raw_log_console.textCursor()
+            if backward:
+                cursor.movePosition(QTextCursor.MoveOperation.End)
+            else:
+                cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self.raw_log_console.setTextCursor(cursor)
+
+            found = self.raw_log_console.find(keyword, options)
+            if not found:
+                self.statusBar().showMessage(f"⚠️ 搜索完毕：未找到 '{keyword}'")
+                self.search_input.setStyleSheet("border: 1px solid #EF4444;")
+                self.raw_log_console.setExtraSelections([])
+            else:
+                self.statusBar().showMessage(f"🔄 已折返并找到 '{keyword}'")
+                self.search_input.setStyleSheet("")
+        else:
+            self.statusBar().showMessage(f"✅ 找到匹配项 '{keyword}'")
+            self.search_input.setStyleSheet("")
+
+            # =========================================================
+        # 🌟 2. 单点爆破：用最极其刺眼的颜色，标出【当前跳到的这一个词】
+        # =========================================================
+        if found:
+            extra_selections = []
+            selection = QTextEdit.ExtraSelection()
+
+            # 设置【当前选中点】为极具冲击力的：亮橙色/亮黄色 + 纯黑字
+            selection.format.setBackground(QColor("#FF9800"))
+            selection.format.setForeground(QColor("#000000"))
+
+            cursor = self.raw_log_console.textCursor()
+            selection.cursor = QTextCursor(cursor)
+            extra_selections.append(selection)
+
+            self.raw_log_console.setExtraSelections(extra_selections)
+
+            # 智能挪动隐形光标，防止向上搜索卡死
+            if backward:
+                cursor.setPosition(cursor.selectionStart())
+            else:
+                cursor.setPosition(cursor.selectionEnd())
+            self.raw_log_console.setTextCursor(cursor)
+
+            if self.cb_auto_scroll.isChecked():
+                self.cb_auto_scroll.setChecked(False)
+                self.statusBar().showMessage("⏸️ 触发搜索，已暂停自动滚动", 3000)
 
     def populate_protocols(self):
         json_files = [f for f in os.listdir('.') if f.endswith('.json')]
