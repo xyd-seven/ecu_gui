@@ -779,16 +779,12 @@ class EcuMainWindow(QMainWindow):
         # 三屏联动布局
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左侧终端主容器
+        # 左侧终端
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         term_toolbar = QHBoxLayout()
-        term_toolbar.setContentsMargins(0, 0, 0, 0)  # 🌟 强制消除所有外边距，让控件贴边！
-
-        # 🚨 (这里去掉了原本的 QLabel，让搜索框霸占最左侧一号位) 🚨
-
         # ==========================================
         # 🌟 极简专业工具栏 (状态按钮 + 折叠菜单)
         # ==========================================
@@ -807,33 +803,33 @@ class EcuMainWindow(QMainWindow):
         self.btn_search_next.setToolTip("向下查找")
         self.btn_search_next.clicked.connect(self.search_next)
 
-        # 状态按钮 1：过滤
+        # 🌟 状态按钮 1：替代原本的过滤 CheckBox
         self.cb_filter_mode = QPushButton("🎯 过滤")
-        self.cb_filter_mode.setCheckable(True)
+        self.cb_filter_mode.setCheckable(True)  # 开启状态保持功能
         self.cb_filter_mode.setToolTip("开启/关闭仅显匹配行")
         self.cb_filter_mode.toggled.connect(self.apply_log_filter)
 
-        # 🌟 核心排版：弹簧把左右两拨按钮完美隔开
+        # 弹簧将左右隔开
         term_toolbar.addStretch()
 
-        # 状态按钮 2：时间戳
+        # 🌟 状态按钮 2：替代原本的时间戳 CheckBox
         self.cb_timestamp = QPushButton("⏱️ 时戳")
         self.cb_timestamp.setCheckable(True)
         self.cb_timestamp.setChecked(True)
         self.cb_timestamp.setToolTip("开启/关闭时间戳注入")
 
-        # 状态按钮 3：自动滚动
+        # 🌟 状态按钮 3：替代原本的自动滚动 CheckBox
         self.cb_auto_scroll = QPushButton("⏬ 滚动")
         self.cb_auto_scroll.setCheckable(True)
         self.cb_auto_scroll.setChecked(True)
         self.cb_auto_scroll.setToolTip("弹起以冻结视口，按下恢复自动滚动")
 
-        # 极简清空按钮
+        # 极简清空按钮 (仅保留图标)
         self.btn_clear_term = QPushButton("🗑️")
         self.btn_clear_term.setToolTip("清空控制台日志")
         self.btn_clear_term.clicked.connect(self.clear_all_data)
 
-        # 终极收纳：“⋮ 更多”菜单
+        # 🌟 终极收纳：将低频操作折叠进“⋮ 更多”菜单
         self.btn_more = QPushButton("⋮ 更多")
         more_menu = QMenu(self)
 
@@ -843,14 +839,14 @@ class EcuMainWindow(QMainWindow):
         self.action_record = more_menu.addAction("⏺️ 开始实时录制")
         self.action_record.triggered.connect(self.toggle_recording)
 
-        more_menu.addSeparator()
+        more_menu.addSeparator()  # 分割线
 
         action_regex = more_menu.addAction("⚙️ 自定义高亮配置")
         action_regex.triggered.connect(self.open_regex_config)
 
         self.btn_more.setMenu(more_menu)
 
-        # 依次加入布局，搜索框第一个入场，死死贴住左侧！
+        # 依次加入布局
         term_toolbar.addWidget(self.search_input)
         term_toolbar.addWidget(self.btn_search_prev)
         term_toolbar.addWidget(self.btn_search_next)
