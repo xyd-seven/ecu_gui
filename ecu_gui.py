@@ -20,9 +20,9 @@ except ImportError:
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
                              QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
-                             QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem)
+                             QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QPlainTextEdit)
 from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QFont, QTextCursor,
-                         QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter)
+                         QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter, QIcon)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, QRegularExpression, QTimer
 
 
@@ -162,15 +162,34 @@ class LogHighlighter(QSyntaxHighlighter):
         self.rules = []
         self.search_keyword = ""
         self.is_dark = is_dark_mode
+
+        # ==========================================
+        # 🚀 核心优化 1：正则预编译 (极其关键！)
+        # 把高频使用的正则移到这里只编译一次，严禁在几万行的循环里重复创建！
+        # ==========================================
+        import re
+        self.tx_pattern = re.compile(r"(?i)(nb_send|send|发送|\[上行\])")
+        self.rx_pattern = re.compile(r"(?i)(nb_recv|recv|接收|\[下行\])")
+        self.hex_pattern = QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[\s\-]+){3,}[0-9a-fA-F]{2}\b")
+        self.search_pattern = None
+
         self.update_theme(is_dark_mode)
 
     def set_search_keyword(self, keyword):
         if self.search_keyword != keyword:
             self.search_keyword = keyword
-            # 💡 必须恢复 rehighlight()，否则拉到前面或后面一定会漏掉高亮
-            # 别担心，我们在下一步通过“快速跳过”机制来提速
+            # 🚀 核心优化 2：只有当搜索词发生改变时，才去编译搜索专用正则
+            if keyword and len(keyword) >= 2:
+                self.search_pattern = QRegularExpression(
+                    QRegularExpression.escape(keyword),
+                    QRegularExpression.PatternOption.CaseInsensitiveOption
+                )
+            else:
+                self.search_pattern = None
+
             self.rehighlight()
 
+    # (注意：此处的 update_theme 方法保持原样，不用修改)
     def update_theme(self, is_dark_mode):
         self.is_dark = is_dark_mode
         self.rules.clear()
@@ -182,71 +201,37 @@ class LogHighlighter(QSyntaxHighlighter):
             if italic: fmt.setFontItalic(True)
             return fmt
 
-        # ==========================================
-        # 🎨 致敬 WindTerm (dige-black / Monokai 风格)
-        # ==========================================
-        # 🔢 数字：高级紫 (Monokai Purple)，极其醒目且不刺眼
         c_num = "#AE81FF" if is_dark_mode else "#8959A8"
-        # 📝 字符串：经典黄绿 (Bright Green)
         c_str = "#A6E22E" if is_dark_mode else "#718C00"
-        # 🌐 网络地址：明艳橙色 (Orange)
         c_net = "#FD971F" if is_dark_mode else "#F5871F"
-
-        # 🚦 日志级别
-        c_err = "#F92672" if is_dark_mode else "#C82829"  # 报错：玫红色 (极高对比度)
-        c_warn = "#E6DB74" if is_dark_mode else "#EAB700"  # 警告：亮黄色
-        c_info = "#66D9EF" if is_dark_mode else "#3E999F"  # 正常：亮青色
-
-        # 🕒 时间戳与调试：正宗的高级灰，不抢戏，看得清
+        c_err = "#F92672" if is_dark_mode else "#C82829"
+        c_warn = "#E6DB74" if is_dark_mode else "#EAB700"
+        c_info = "#66D9EF" if is_dark_mode else "#3E999F"
         c_dbg = "#8A8A8A" if is_dark_mode else "#8E908C"
-        c_time = "#A6E22E" if is_dark_mode else "#2E8B57"
+        c_time = "#6A9955" if is_dark_mode else "#2E8B57"
 
-        # 1. 🔢 基础值类型 (数字) - 增加“非行首”判定
-        # (?<!^\[) 确保数字如果紧跟在行首的 [ 后面，不进行高亮，防止串口工具时间戳变紫
-        # (?<![\w\-]) 和 (?![\w\-]) 依然保留，用于避开 0000-000F
         num_regex = r"(?<!^\[)(?<![\w\-])[-+]?\b\d*\.?\d+\b(?![\w\-])"
         self.rules.append((QRegularExpression(num_regex), create_format(c_num)))
-
-        # 2. 📝 字符串提取
         self.rules.append((QRegularExpression(r'"[^"]*"'), create_format(c_str)))
         self.rules.append((QRegularExpression(r"'[^']*'"), create_format(c_str)))
-
-        # 3. 🌐 网络标识特征
         self.rules.append((QRegularExpression(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), create_format(c_net, True)))
         self.rules.append(
             (QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b"), create_format(c_net, True)))
-
-        # 4. 🚦 日志级别与业务状态关键字
         self.rules.append((QRegularExpression(r"(?i)\b(error|fail|failed|fatal|exception|timeout|异常|失败)\b"),
                            create_format(c_err, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(warn|warning|警告)\b"), create_format(c_warn, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(info|success|ok|成功|完成)\b"), create_format(c_info, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(debug|trace|调试)\b"), create_format(c_dbg, False, True)))
 
-        # 5. 🕒 终极时间戳方案 (全实写模式：解决 12:12:23 后面带空格的问题)
-
-        # 5.1 定义四个最常见的物理结构（直接实写，不嵌套，最稳固）
-        # 模式1: [年月日 时分秒(含毫秒) 空格] -> 对应您的日志格式
         p1 = r"\[\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\s*\]"
-        # 模式2: [时分秒(含毫秒) 空格]
         p2 = r"\[\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\s*\]"
-        # 模式3: 无括号的 年月日 时分秒
         p3 = r"\b\d{2,4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\b"
-        # 模式4: 无括号的 纯时分秒 (如 $pos 后的 3:23:4)
         p4 = r"\b\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?\b"
-
-        # 组合成最终正则
         time_base = f"{p1}|{p2}|{p3}|{p4}"
 
-        # 5.2 全局涂绿：把日志里所有的时间戳整串变绿
-        # 由于这步在数字规则之后，它会强行覆盖掉紫色的数字
         self.rules.append((QRegularExpression(time_base), create_format(c_time)))
-
-        # 5.3 行首纠偏：只要是紧贴行首的时间戳（串口工具自带），强行刷回灰色
-        # 使用 ^ 锚点确保只对最左侧生效
         self.rules.append((QRegularExpression(f"^{p1}|^{p2}"), create_format(c_dbg)))
 
-        # 6. ⚙️ 用户自定义规则 (保证最高优先级)
         import os, json
         if os.path.exists("highlight_rules.json"):
             try:
@@ -261,8 +246,6 @@ class LogHighlighter(QSyntaxHighlighter):
         self.rehighlight()
 
     def highlightBlock(self, text):
-        import re
-
         # --- 第一步：执行智能语义和自定义正则表达式渲染 ---
         for pattern, format in self.rules:
             match_iterator = pattern.globalMatch(text)
@@ -270,35 +253,27 @@ class LogHighlighter(QSyntaxHighlighter):
                 match = match_iterator.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), format)
 
-        # --- 第二步：定向追踪通信方向 (保留原有的上下行 HEX 特色) ---
-        is_tx = re.search(r"(?i)(nb_send|send|发送|\[上行\])", text)
-        is_rx = re.search(r"(?i)(nb_recv|recv|接收|\[下行\])", text)
+        # --- 第二步：定向追踪通信方向 (使用预编译对象提速) ---
+        is_tx = self.tx_pattern.search(text)
+        is_rx = self.rx_pattern.search(text) if not is_tx else None
 
-        # 精准狙击连续的 HEX 数据流 (必须出现3个以上的HEX字符组)
-        hex_pattern = QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[\s\-]+){3,}[0-9a-fA-F]{2}\b")
-        hex_iterator = hex_pattern.globalMatch(text)
+        hex_iterator = self.hex_pattern.globalMatch(text)
         while hex_iterator.hasNext():
             match = hex_iterator.next()
             hex_fmt = QTextCharFormat()
-            #hex_fmt.setFontWeight(QFont.Weight.Bold)
             if is_tx:
-                hex_fmt.setForeground(QColor("#38BDF8") if self.is_dark else QColor("#0284C7"))  # 上行专属蓝
+                hex_fmt.setForeground(QColor("#569CD6") if self.is_dark else QColor("#0284C7"))
             elif is_rx:
-                hex_fmt.setForeground(QColor("#FBBF24") if self.is_dark else QColor("#D97706"))  # 下行专属黄
+                hex_fmt.setForeground(QColor("#C3A66B") if self.is_dark else QColor("#D97706"))
             else:
-                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))  # 未知通信专属紫
+                hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))
             self.setFormat(match.capturedStart(), match.capturedLength(), hex_fmt)
 
-        # --- 第三步：全局搜索结果绝对置顶 (不受任何其它颜色影响) ---
-        if self.search_keyword and len(self.search_keyword) >= 2:
-            # 💡 性能优化的核武器：先做简单的字符串包含判断（C级速度）
-            # 只有这行文字真的包含这个词，才启动昂贵的正则引擎
+        # --- 第三步：全局搜索结果绝对置顶 ---
+        if self.search_pattern and self.search_keyword and len(self.search_keyword) >= 2:
+            # 💡 极速判断：先做字符串包含，如果没有直接跳过，绝不启动正则！
             if self.search_keyword.lower() in text.lower():
-                search_pattern = QRegularExpression(
-                    QRegularExpression.escape(self.search_keyword),
-                    QRegularExpression.PatternOption.CaseInsensitiveOption
-                )
-                search_iterator = search_pattern.globalMatch(text)
+                search_iterator = self.search_pattern.globalMatch(text)
 
                 search_fmt = QTextCharFormat()
                 if self.is_dark:
@@ -308,7 +283,6 @@ class LogHighlighter(QSyntaxHighlighter):
                     search_fmt.setBackground(QColor("#F472B6"))
                     search_fmt.setForeground(QColor("#000000"))
 
-                # 🌟 为高亮文字增加加粗效果
                 search_fmt.setFontWeight(QFont.Weight.Bold)
 
                 while search_iterator.hasNext():
@@ -323,7 +297,6 @@ class TerminalTextEdit(QTextEdit):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
-        self.minimap_highlights = []  # 存储需要画线的块号
 
         font = QFont("Consolas", 10)
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
@@ -331,7 +304,30 @@ class TerminalTextEdit(QTextEdit):
         self.setReadOnly(True)
         self.document().setMaximumBlockCount(50000)
         self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
+        # ==========================================
+        # 🚀 QTextEdit 性能极限优化三板斧
+        # ==========================================
+        # 1. 内存截断：限制 5 万行（对于 QTextEdit 足够安全）
+        self.document().setMaximumBlockCount(50000)
+        # 2. 极其关键：关闭历史撤销栈！(能节省海量内存和对象创建开销)
+        self.setUndoRedoEnabled(False)
+        # 3. 关闭自动换行：避免窗口缩放时几万行文本重新计算高度导致的卡死
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
 
+        self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
+
+        # ==========================================
+        # 🌟 完美找回行间距 (QTextEdit 支持度 100%)
+        # ==========================================
+        block_fmt = QTextBlockFormat()
+        # 130 代表 130% 的行高，1 代表枚举值 ProportionalHeight
+        block_fmt.setLineHeight(130, 1)
+        block_fmt.setBottomMargin(2)
+
+        # 将这个格式应用到全局光标，后续追加的所有日志都会自动继承这个间距！
+        cursor = self.textCursor()
+        cursor.setBlockFormat(block_fmt)
+        self.setTextCursor(cursor)
         # ==========================================
         # 🌟 致敬 PyCharm 2022.3 Darcula 经典配
         # ==========================================
@@ -342,22 +338,6 @@ class TerminalTextEdit(QTextEdit):
                 border: none;              /* 去除多余边框更清爽 */
             }
         """)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # 🌟 雷达图渲染逻辑：在界面最右侧画出提示线
-        if self.minimap_highlights:
-            painter = QPainter(self.viewport())
-            painter.setOpacity(0.8)
-            color = QColor("#00BFFF" if self.main_window.is_dark_mode else "#4ADE80")
-
-            total_blocks = max(1, self.document().blockCount())
-            h = self.viewport().rect().height()
-            w = self.viewport().rect().width()
-
-            for block_num in self.minimap_highlights:
-                y = int((block_num / total_blocks) * h)
-                painter.fillRect(w - 8, y, 8, 3, color)
 
     def wheelEvent(self, event):
         if event.angleDelta().y() > 0:
@@ -976,7 +956,14 @@ class FrameTableModel(QAbstractTableModel):
 class EcuMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("多协议实时解析工作站 (GUI Pro Max 版)")
+        self.setWindowTitle("ECU串口解析工具")
+        # ==========================================
+        # 🌟 新增：设置窗口左上角和任务栏图标
+        # ==========================================
+        import os
+        if os.path.exists("logo.ico"):
+            self.setWindowIcon(QIcon("logo.ico"))
+
         self.resize(1300, 800)
 
         self.is_dark_mode = True
@@ -1055,15 +1042,32 @@ class EcuMainWindow(QMainWindow):
         self.btn_theme = QPushButton("☀️ 浅色")
         self.btn_theme.clicked.connect(self.toggle_theme)
         top_bar_layout.addWidget(self.btn_theme)
+        # ==========================================
+        # 🌟 3. 新增：左右面板显隐控制按钮
+        # ==========================================
+        self.btn_toggle_left = QPushButton("🖥️ 串口终端")
+        self.btn_toggle_left.setCheckable(True)
+        self.btn_toggle_left.setChecked(True)  # 默认显示并处于按下状态
+        self.btn_toggle_left.clicked.connect(self.toggle_left_panel)
+        top_bar_layout.addWidget(self.btn_toggle_left)
+
+        self.btn_toggle_right = QPushButton("📊 解析面板")
+        self.btn_toggle_right.setCheckable(True)
+        self.btn_toggle_right.setChecked(True)  # 默认显示并处于按下状态
+        self.btn_toggle_right.clicked.connect(self.toggle_right_panel)
+        top_bar_layout.addWidget(self.btn_toggle_right)
 
         main_layout.addLayout(top_bar_layout)
 
         # 三屏联动布局
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        #main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左侧终端
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
+        # ==========================================
+        # 🌟 1. 左侧终端面板提升为 self 属性
+        # ==========================================
+        self.left_panel = QWidget()
+        left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         term_toolbar = QHBoxLayout()
@@ -1076,9 +1080,14 @@ class EcuMainWindow(QMainWindow):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索...")
-        self.search_input.setMaximumWidth(140)
-        self.search_input.returnPressed.connect(self.search_next)
-        # 🌟 在下面新增一行 textChanged 的绑定：
+
+        # 🌟 1. 设置最小宽度保证基本显示，设置最大宽度防止在 4K 屏上长得太离谱
+        self.search_input.setMinimumWidth(140)
+        self.search_input.setMaximumWidth(400)
+
+        # 🌟 2. 赋予它“弹性”：水平方向尽量膨胀，垂直方向保持固定高度
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
         self.search_input.textChanged.connect(self.on_search_text_changed)
 
         self.btn_search_prev = QPushButton("⬆️")
@@ -1146,13 +1155,16 @@ class EcuMainWindow(QMainWindow):
         # 🌟 新增：监听垂直滚动条的数值变化，实现触底自动恢复滚动
         # ==========================================
         self.raw_log_console.verticalScrollBar().valueChanged.connect(self._on_log_scrollbar_changed)
-        main_splitter.addWidget(left_widget)
+        self.main_splitter.addWidget(self.left_panel)
 
-        # 右侧解析详情
-        right_splitter = QSplitter(Qt.Orientation.Vertical)
+        # ==========================================
+        # 🌟 2. 右侧解析详情面板提升为 self 属性
+        # ==========================================
+        # 统一命名为 self.right_panel，用来被顶部按钮控制显隐
+        self.right_panel = QSplitter(Qt.Orientation.Vertical)
+
         right_top_widget = QWidget()
         right_top_layout = QVBoxLayout(right_top_widget)
-        right_top_layout.setContentsMargins(0, 0, 0, 0)
 
         table_toolbar = QHBoxLayout()
         table_toolbar.addWidget(QLabel("📊 解析流水线"))
@@ -1170,22 +1182,33 @@ class EcuMainWindow(QMainWindow):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.horizontalHeader().setStretchLastSection(True)
+
         # 🌟 增加这一行：开启表格隔行变色（斑马线效果）
         self.table_view.setAlternatingRowColors(True)
         self.table_view.clicked.connect(self.on_row_clicked)
         right_top_layout.addWidget(self.table_view)
-        right_splitter.addWidget(right_top_widget)
+
+        # 将表格区域加到右侧面板中
+        self.right_panel.addWidget(right_top_widget)
 
         self.tree_view = QTreeView()
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["字段结构解析详情"])
         self.tree_view.setModel(self.tree_model)
-        right_splitter.addWidget(self.tree_view)
 
-        right_splitter.setSizes([500, 300])
-        main_splitter.addWidget(right_splitter)
-        main_splitter.setSizes([500, 800])
-        main_layout.addWidget(main_splitter)
+        # 将树状图区域加到右侧面板中
+        self.right_panel.addWidget(self.tree_view)
+
+        # 设置右侧面板内部（表格和树状图）的上下比例
+        self.right_panel.setSizes([500, 300])
+
+        # 🌟 3. 将组装好的右侧面板，加入到主分割器中
+        self.main_splitter.addWidget(self.right_panel)
+        # 设置左侧终端和右侧面板的左右初始比例
+        self.main_splitter.setSizes([500, 800])
+
+        # 🌟 4. 将主分割器加入到窗口主布局中
+        main_layout.addWidget(self.main_splitter)
 
         self.statusBar().showMessage("状态: 待命")
         self.progress_bar = QProgressBar()
@@ -1195,6 +1218,31 @@ class EcuMainWindow(QMainWindow):
         self.change_protocol()
         self.setStyleSheet(self.get_dark_qss())
         self.apply_terminal_style()
+
+    # ==========================================
+    # 🌟 显隐控制逻辑
+    # ==========================================
+    def toggle_left_panel(self):
+        is_visible = self.btn_toggle_left.isChecked()
+
+        # 保护机制：不能把两边都关了
+        if not is_visible and not self.right_panel.isVisible():
+            self.btn_toggle_left.setChecked(True)  # 强制弹回
+            QMessageBox.warning(self, "提示", "必须至少保留一个工作区！")
+            return
+
+        self.left_panel.setVisible(is_visible)
+
+    def toggle_right_panel(self):
+        is_visible = self.btn_toggle_right.isChecked()
+
+        # 保护机制：不能把两边都关了
+        if not is_visible and not self.left_panel.isVisible():
+            self.btn_toggle_right.setChecked(True)  # 强制弹回
+            QMessageBox.warning(self, "提示", "必须至少保留一个工作区！")
+            return
+
+        self.right_panel.setVisible(is_visible)
 
     def _on_log_scrollbar_changed(self, value):
         scrollbar = self.raw_log_console.verticalScrollBar()
@@ -1280,30 +1328,23 @@ class EcuMainWindow(QMainWindow):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         keyword = self.search_input.text()
 
-        # 触发背景全局高亮 (LogHighlighter 会自动给屏幕上的关键字上色)
         if hasattr(self.raw_log_console, 'highlighter'):
             self.raw_log_console.highlighter.set_search_keyword(keyword)
 
         if not keyword:
             self.raw_log_console.setExtraSelections([])
-            self.raw_log_console.minimap_highlights.clear()
             self.raw_log_console.viewport().update()
             return
 
         # ==========================================================
-        # 🌟 2. 核心拦截：如果是“边打字边触发”的自动搜索
-        # ==========================================================
+        # 🌟 自动搜索拦截
+        # ==========================================
         if is_typing_auto:
-            self.raw_log_console.setExtraSelections([])  # 清除之前跳转留下的橙色方块
-
-            # 仅仅更新雷达图 (如果您之前封装了 _update_minimap_internal，在这里调用)
-            if hasattr(self, '_update_minimap_internal'):
-                self._update_minimap_internal(keyword)
-
-            self.raw_log_console.viewport().update()  # 刷新界面显示高亮
-
-            # 🚀 直接结束！不执行 find()，不抢夺焦点，不冻结滚动！
+            self.raw_log_console.setExtraSelections([])
+            self.raw_log_console.viewport().update()
             return
+
+            # ... (中间的 current_extra 寻找和执行 find() 的代码完全保持不变) ...
 
         # ==========================================================
         # 🌟 核心修复：根据“橙色方块”的位置强制跳出
@@ -1380,14 +1421,23 @@ class EcuMainWindow(QMainWindow):
 
         self.raw_log_console.viewport().update()
 
-    def _update_minimap_internal(self, keyword):
+    def _update_minimap_internal(self, keyword, is_typing_auto=False):
         if not keyword:
             self.raw_log_console.minimap_highlights = []
             return
+
+        # 🚀 核心优化 3：智能熔断保护！
+        doc = self.raw_log_console.document()
+        if is_typing_auto and doc.blockCount() > 10000:
+            # 如果是打字触发的，并且日志超过1万行，直接跳过雷达图全量提取以防止卡死！
+            # 当你敲下回车键时 (is_typing_auto=False)，它才会进行全局雷达图计算。
+            return
+
         # 使用 str.find 代替逐行遍历，速度提升百倍
         text = self.raw_log_console.toPlainText()
         highlights = []
         pos = 0
+
         # 限制雷达图扫描前100万字，保护大数据量性能
         if len(text) < 1000000:
             while True:
@@ -1395,7 +1445,7 @@ class EcuMainWindow(QMainWindow):
                 if pos == -1: break
                 highlights.append(self.raw_log_console.document().findBlock(pos).blockNumber())
                 pos += len(keyword)
-        self.raw_log_console.minimap_highlights = list(set(highlights))  # 去重
+        self.raw_log_console.minimap_highlights = list(set(highlights))
 
     # ==========================================
     # 其他业务逻辑 (数据接入、文件导出等)
@@ -1579,7 +1629,6 @@ class EcuMainWindow(QMainWindow):
 
     def clear_all_data(self):
         self.raw_log_console.clear()
-        self.raw_log_console.minimap_highlights.clear()
         self.all_frames.clear()
         self.filtered_frames.clear()
         self.table_model.update_data([])
@@ -1673,6 +1722,7 @@ class EcuMainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def apply_terminal_style(self):
+        # 确保 raw_log_console 存在
         if hasattr(self, 'raw_log_console') and self.raw_log_console:
             if self.is_dark_mode:
                 self.raw_log_console.setStyleSheet("""
@@ -1683,58 +1733,59 @@ class EcuMainWindow(QMainWindow):
                     }
                 """)
             else:
-                # ☀️ 浅色模式护眼优化：使用“柔和灰白”代替纯白，使用“深灰”代替纯黑
+                # ☀️ 浅色模式绝对护眼方案：Solarized 暖光纸色
                 self.raw_log_console.setStyleSheet("""
                     QTextEdit {
-                        background-color: #F6F8FA; /* 极浅的护眼冷灰，降低反光率 */
-                        color: #24292E;            /* 柔和的深灰蓝，避免高反差刺眼 */
+                        background-color: #FDF6E3; /* 核心护眼色：羊皮纸米黄色，彻底消除蓝光 */
+                        color: #4A555D;            /* 柔和的深蓝灰色字体，对比度适中 */
                         border: none;
                     }
                 """)
 
+            # 通知底层高亮引擎切换配色方案
             if hasattr(self.raw_log_console, 'highlighter'):
                 self.raw_log_console.highlighter.update_theme(self.is_dark_mode)
 
     def get_light_qss(self):
         return """
-        /* 主窗口背景：稍微深一点的浅灰色，突出前面的控件 */
-        QWidget { background-color: #EBEDF0; color: #24292E; font-family: "Microsoft YaHei", "Segoe UI"; }
+        /* 主窗口背景：比中间的纸色略深一点的卡其灰，压住视觉 */
+        QWidget { background-color: #EEE8D5; color: #4A555D; font-family: "Microsoft YaHei", "Segoe UI"; }
 
-        /* 输入框、下拉框等交互组件：使用柔和灰白 */
-        QLineEdit, QTextEdit, QComboBox, QCheckBox { background-color: #F6F8FA; color: #24292E; border: 1px solid #D0D7DE; border-radius: 4px; padding: 4px; }
+        /* 交互组件：使用主护眼色 */
+        QLineEdit, QTextEdit, QComboBox, QCheckBox { background-color: #FDF6E3; color: #4A555D; border: 1px solid #D6D0BA; border-radius: 4px; padding: 4px; }
 
-        /* 按钮使用非常淡的灰白色，悬浮时加深 */
-        QPushButton { background-color: #F6F8FA; color: #24292E; border: 1px solid #D0D7DE; border-radius: 4px; padding: 4px 8px; }
-        QPushButton:hover { background-color: #F3F4F6; color: #0969DA; border: 1px solid #0969DA; }
-        QPushButton:checked { background-color: #DDEBFD; color: #0969DA; border: 1px solid #0969DA; font-weight: bold; }
+        /* 按钮：温和的纸色，悬浮时稍微加深，点击时使用柔和的莫兰迪蓝 */
+        QPushButton { background-color: #FDF6E3; color: #4A555D; border: 1px solid #D6D0BA; border-radius: 4px; padding: 4px 8px; }
+        QPushButton:hover { background-color: #E6DFCB; color: #2A6F97; border: 1px solid #99B2C6; }
+        QPushButton:checked { background-color: #D4E4F0; color: #2A6F97; border: 1px solid #2A6F97; font-weight: bold; }
 
-        /* 🌟 右侧流水线表格：浅灰白底色，配合淡淡的斑马纹 */
+        /* 🌟 右侧流水线表格：纸色背景 + 极淡的暖卡其色斑马纹 */
         QTableView { 
-            background-color: #F6F8FA; 
-            color: #24292E; 
-            gridline-color: #D0D7DE; 
-            border: 1px solid #D0D7DE; 
-            selection-background-color: #0969DA; 
+            background-color: #FDF6E3; 
+            color: #4A555D; 
+            gridline-color: #E2DBCA; 
+            border: 1px solid #D6D0BA; 
+            selection-background-color: #93A1A1;  /* 选中时使用护眼莫兰迪灰绿 */
             selection-color: #FFFFFF; 
-            alternate-background-color: #F0F3F6; /* 淡淡的隔行变色 */
+            alternate-background-color: #F6EFCF;  /* 淡淡的泛黄隔行变色 */
         }
 
         /* 🌟 字段解析树状图 */
         QTreeView { 
-            background-color: #F6F8FA; 
-            color: #24292E; 
-            border: 1px solid #D0D7DE; 
-            selection-background-color: #0969DA; 
+            background-color: #FDF6E3; 
+            color: #4A555D; 
+            border: 1px solid #D6D0BA; 
+            selection-background-color: #93A1A1; 
             selection-color: #FFFFFF; 
         }
 
-        /* 表头：底色加深一点点，形成视觉分层 */
+        /* 表头：底色加深，形成视觉分层 */
         QHeaderView::section { 
-            background-color: #EBEDF0; 
-            color: #57606A; 
+            background-color: #E6DFCB; 
+            color: #586E75; 
             border: none; 
-            border-right: 1px solid #D0D7DE; 
-            border-bottom: 1px solid #D0D7DE; 
+            border-right: 1px solid #D6D0BA; 
+            border-bottom: 1px solid #D6D0BA; 
             padding: 4px; 
             font-weight: bold; 
         }
