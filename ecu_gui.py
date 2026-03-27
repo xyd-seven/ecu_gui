@@ -20,7 +20,8 @@ except ImportError:
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
                              QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
-                             QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QPlainTextEdit)
+                             QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QPlainTextEdit,
+                             QRadioButton)
 from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QFont, QTextCursor,
                          QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter, QIcon)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, QRegularExpression, QTimer
@@ -160,36 +161,16 @@ class LogHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark_mode=True):
         super().__init__(document)
         self.rules = []
-        self.search_keyword = ""
         self.is_dark = is_dark_mode
 
-        # ==========================================
-        # 🚀 核心优化 1：正则预编译 (极其关键！)
-        # 把高频使用的正则移到这里只编译一次，严禁在几万行的循环里重复创建！
-        # ==========================================
+        # 🚀 预编译正则
         import re
         self.tx_pattern = re.compile(r"(?i)(nb_send|send|发送|\[上行\])")
         self.rx_pattern = re.compile(r"(?i)(nb_recv|recv|接收|\[下行\])")
         self.hex_pattern = QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[\s\-]+){3,}[0-9a-fA-F]{2}\b")
-        self.search_pattern = None
 
         self.update_theme(is_dark_mode)
 
-    def set_search_keyword(self, keyword):
-        if self.search_keyword != keyword:
-            self.search_keyword = keyword
-            # 🚀 核心优化 2：只有当搜索词发生改变时，才去编译搜索专用正则
-            if keyword and len(keyword) >= 2:
-                self.search_pattern = QRegularExpression(
-                    QRegularExpression.escape(keyword),
-                    QRegularExpression.PatternOption.CaseInsensitiveOption
-                )
-            else:
-                self.search_pattern = None
-
-            self.rehighlight()
-
-    # (注意：此处的 update_theme 方法保持原样，不用修改)
     def update_theme(self, is_dark_mode):
         self.is_dark = is_dark_mode
         self.rules.clear()
@@ -215,10 +196,8 @@ class LogHighlighter(QSyntaxHighlighter):
         self.rules.append((QRegularExpression(r'"[^"]*"'), create_format(c_str)))
         self.rules.append((QRegularExpression(r"'[^']*'"), create_format(c_str)))
         self.rules.append((QRegularExpression(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), create_format(c_net, True)))
-        self.rules.append(
-            (QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b"), create_format(c_net, True)))
-        self.rules.append((QRegularExpression(r"(?i)\b(error|fail|failed|fatal|exception|timeout|异常|失败)\b"),
-                           create_format(c_err, True)))
+        self.rules.append((QRegularExpression(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b"), create_format(c_net, True)))
+        self.rules.append((QRegularExpression(r"(?i)\b(error|fail|failed|fatal|exception|timeout|异常|失败)\b"), create_format(c_err, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(warn|warning|警告)\b"), create_format(c_warn, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(info|success|ok|成功|完成)\b"), create_format(c_info, True)))
         self.rules.append((QRegularExpression(r"(?i)\b(debug|trace|调试)\b"), create_format(c_dbg, False, True)))
@@ -242,18 +221,15 @@ class LogHighlighter(QSyntaxHighlighter):
                         self.rules.append((QRegularExpression(r['regex']), fmt))
             except:
                 pass
-
         self.rehighlight()
 
     def highlightBlock(self, text):
-        # --- 第一步：执行智能语义和自定义正则表达式渲染 ---
         for pattern, format in self.rules:
             match_iterator = pattern.globalMatch(text)
             while match_iterator.hasNext():
                 match = match_iterator.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), format)
 
-        # --- 第二步：定向追踪通信方向 (使用预编译对象提速) ---
         is_tx = self.tx_pattern.search(text)
         is_rx = self.rx_pattern.search(text) if not is_tx else None
 
@@ -268,26 +244,6 @@ class LogHighlighter(QSyntaxHighlighter):
             else:
                 hex_fmt.setForeground(QColor("#A855F7") if self.is_dark else QColor("#9333EA"))
             self.setFormat(match.capturedStart(), match.capturedLength(), hex_fmt)
-
-        # --- 第三步：全局搜索结果绝对置顶 ---
-        if self.search_pattern and self.search_keyword and len(self.search_keyword) >= 2:
-            # 💡 极速判断：先做字符串包含，如果没有直接跳过，绝不启动正则！
-            if self.search_keyword.lower() in text.lower():
-                search_iterator = self.search_pattern.globalMatch(text)
-
-                search_fmt = QTextCharFormat()
-                if self.is_dark:
-                    search_fmt.setBackground(QColor("#2E6A41"))
-                    search_fmt.setForeground(QColor("#FFFFFF"))
-                else:
-                    search_fmt.setBackground(QColor("#F472B6"))
-                    search_fmt.setForeground(QColor("#000000"))
-
-                search_fmt.setFontWeight(QFont.Weight.Bold)
-
-                while search_iterator.hasNext():
-                    match = search_iterator.next()
-                    self.setFormat(match.capturedStart(), match.capturedLength(), search_fmt)
 
 
 # ==========================================
@@ -311,8 +267,9 @@ class TerminalTextEdit(QTextEdit):
         self.document().setMaximumBlockCount(50000)
         # 2. 极其关键：关闭历史撤销栈！(能节省海量内存和对象创建开销)
         self.setUndoRedoEnabled(False)
-        # 3. 关闭自动换行：避免窗口缩放时几万行文本重新计算高度导致的卡死
-        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # 🌟 恢复自动换行：根据当前界面的宽度自动软折行
+        # 软折行在视觉上会换行，但物理上依然是“同一行”，所以完美契合“只在开头加时间戳”的需求！
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
         self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
 
@@ -372,7 +329,8 @@ class AutoRefreshComboBox(QComboBox):
 # 串口守护线程: 后台独立无损抓包
 # ==========================================
 class SerialWorker(QThread):
-    data_received = pyqtSignal(str)
+    # 🌟 修改 1：将信号的数据类型从 str 改为 bytes
+    data_received = pyqtSignal(bytes)
     error_occurred = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
@@ -385,17 +343,33 @@ class SerialWorker(QThread):
 
     def run(self):
         try:
-            self.serial = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            # timeout 设为极小值，配合我们自己的空闲检测逻辑
+            self.serial = serial.Serial(self.port, self.baudrate, timeout=0.01)
+
             while self.running:
                 if self.serial.in_waiting:
-                    raw_data = self.serial.read(self.serial.in_waiting)
-                    try:
-                        text = raw_data.decode('utf-8', errors='replace')
-                        self.data_received.emit(text)
-                    except:
-                        pass
+                    buffer = bytearray()
+
+                    # ==========================================
+                    # 🌟 核心：SSCOM 动态空闲超时分包算法
+                    # ==========================================
+                    idle_count = 0
+                    # 只要串口不断线，且“空闲次数”小于 3 次（约 30ms），就一直死等拼接！
+                    # 这样无论数据包有多大（即使是 4K 的长包），只要它没有中断，就会被完美聚合成一整包
+                    while self.running and idle_count < 3:
+                        if self.serial.in_waiting:
+                            buffer.extend(self.serial.read(self.serial.in_waiting))
+                            idle_count = 0  # 🌟 重点：只要有新数据进来，立刻清零空闲计时器！
+                        else:
+                            idle_count += 1
+                            self.msleep(10)
+
+                    # 循环结束，说明总线空闲超过了 30ms，这绝对是一包完整的数据了
+                    if buffer:
+                        self.data_received.emit(bytes(buffer))
                 else:
                     self.msleep(10)
+
         except Exception as e:
             self.error_occurred.emit(f"串口异常: {str(e)}")
         finally:
@@ -405,6 +379,21 @@ class SerialWorker(QThread):
 
     def stop(self):
         self.running = False
+
+    # ==========================================
+    # 🌟 新增：线程安全的发送接口
+    # ==========================================
+    def send_data(self, data_bytes):
+        """提供给主线程调用的发送接口"""
+        if self.serial and self.serial.is_open:
+            try:
+                # pySerial 的 write 方法底层自带线程锁，主线程直接调用是安全的
+                self.serial.write(data_bytes)
+                self.serial.flush()  # 确保数据立刻推入物理总线
+                return True, ""
+            except Exception as e:
+                return False, str(e)
+        return False, "串口未打开或已断开"
 
 
 # ==========================================
@@ -994,6 +983,12 @@ class EcuMainWindow(QMainWindow):
         self._last_char_was_newline = True
         self.is_recording = False
         self.record_filename = ""
+        # ==========================================
+        # 🌟 新增：历史数据缓存与 HEX 切换绑定
+        # ==========================================
+        from collections import deque
+        # 使用双端队列，最多保存最近的 2000 包数据，避免长时间挂机导致内存溢出
+        self.terminal_history = deque(maxlen=2000)
 
         # 🌟 新增：防抖定时器与状态记忆
         self.search_timer = QTimer(self)
@@ -1073,6 +1068,15 @@ class EcuMainWindow(QMainWindow):
         self.btn_toggle_right.clicked.connect(self.toggle_right_panel)
         top_bar_layout.addWidget(self.btn_toggle_right)
 
+        # ==========================================
+        # 🌟 1. 新增：发送面板显隐控制按钮
+        # ==========================================
+        self.btn_toggle_send = QPushButton("📤 发送面板")
+        self.btn_toggle_send.setCheckable(True)
+        self.btn_toggle_send.setChecked(False)  # 💡 默认不勾选（隐藏状态）
+        self.btn_toggle_send.clicked.connect(self.toggle_send_panel)
+        top_bar_layout.addWidget(self.btn_toggle_send)
+
         main_layout.addLayout(top_bar_layout)
 
         # 三屏联动布局
@@ -1124,6 +1128,15 @@ class EcuMainWindow(QMainWindow):
         self.cb_timestamp.setChecked(True)
         self.cb_timestamp.setToolTip("开启/关闭时间戳注入")
 
+        # ==========================================
+        # 🌟 1. 新增：接收 HEX 显示切换开关
+        # ==========================================
+        self.cb_hex_display = QPushButton("🔢 HEX接收")
+        self.cb_hex_display.setCheckable(True)
+        self.cb_hex_display.setChecked(False)  # 默认正常ASCII显示
+        self.cb_hex_display.setToolTip("开启后，接收到的数据将以16进制格式显示")
+        self.cb_hex_display.clicked.connect(self.redraw_terminal_history)
+
         self.cb_auto_scroll = QPushButton("⏬ 滚动")
         self.cb_auto_scroll.setCheckable(True)
         self.cb_auto_scroll.setChecked(True)
@@ -1155,22 +1168,68 @@ class EcuMainWindow(QMainWindow):
         term_toolbar.addWidget(self.btn_search_next)
         term_toolbar.addWidget(self.cb_filter_mode)
         term_toolbar.addWidget(self.cb_timestamp)
+        term_toolbar.addWidget(self.cb_hex_display)
         term_toolbar.addWidget(self.cb_auto_scroll)
         term_toolbar.addWidget(self.btn_clear_term)
         term_toolbar.addWidget(self.btn_more)
-
         # 🚨 终极修复：把弹簧加在【所有按钮的最后面】！
         # 这样不管你怎么放大窗口，巨大的弹簧都在右侧，把所有按钮死死顶在左边！
         term_toolbar.addStretch()
-
         left_layout.addLayout(term_toolbar)
 
         self.raw_log_console = TerminalTextEdit(self)
         left_layout.addWidget(self.raw_log_console)
+
+        # ==========================================
+        # 🌟 2. 新增：底部发送面板 (默认隐藏)
+        # ==========================================
+        self.send_panel = QWidget()
+        send_layout = QHBoxLayout(self.send_panel)
+        send_layout.setContentsMargins(5, 5, 5, 5)  # 紧凑边距
+
+        # 发送模式单选
+        self.radio_ascii = QRadioButton("ASCII")
+        self.radio_hex = QRadioButton("HEX")
+        self.radio_ascii.setChecked(True)  # 默认选中 ASCII
+        # 自动联动：切到 HEX 时取消换行，切到 ASCII 时恢复换行
+        self.radio_hex.toggled.connect(lambda checked: (
+        self.cb_send_newline.setChecked(not checked), self.cb_send_newline.setEnabled(not checked)))
+
+        # 附加选项
+        self.cb_send_newline = QCheckBox("发送新行(\\r\\n)")
+        self.cb_send_newline.setChecked(True)
+
+        # 输入框 (支持回车发送)
+        self.send_input = QLineEdit()
+        self.send_input.setPlaceholderText("在此输入要发送的指令 (按回车快速发送)...")
+        # 暂时绑定一个空方法，防止报错
+        self.send_input.returnPressed.connect(self.execute_send_data)
+
+        # 发送按钮
+        self.btn_send = QPushButton("发送 🚀")
+        self.btn_send.setMinimumWidth(80)
+        self.btn_send.clicked.connect(self.execute_send_data)
+
+        # 组装面板
+        send_layout.addWidget(self.radio_ascii)
+        send_layout.addWidget(self.radio_hex)
+        send_layout.addWidget(self.cb_send_newline)
+        send_layout.addWidget(self.send_input)
+        send_layout.addWidget(self.btn_send)
+
+        # 💡 设置默认状态为隐藏
+        self.send_panel.setVisible(False)
+
+        # 将整个发送面板压入左侧主布局的最下方
+        left_layout.addWidget(self.send_panel)
+
         # ==========================================
         # 🌟 新增：监听垂直滚动条的数值变化，实现触底自动恢复滚动
         # ==========================================
         self.raw_log_console.verticalScrollBar().valueChanged.connect(self._on_log_scrollbar_changed)
+        # 🌟 核心：当你疯狂滚动鼠标时，瞬间擦除并重新渲染可见区域的高亮！
+        self.raw_log_console.verticalScrollBar().valueChanged.connect(self.update_viewport_search_highlights)
+
         self.main_splitter.addWidget(self.left_panel)
 
         # ==========================================
@@ -1260,6 +1319,93 @@ class EcuMainWindow(QMainWindow):
 
         self.right_panel.setVisible(is_visible)
 
+    # ==========================================
+    # 🌟 发送面板控制逻辑
+    # ==========================================
+    def toggle_send_panel(self):
+        is_visible = self.btn_toggle_send.isChecked()
+        self.send_panel.setVisible(is_visible)
+
+        # 体验优化：如果展开了发送面板，自动把光标聚焦到输入框，方便直接打字
+        if is_visible:
+            self.send_input.setFocus()
+
+    def execute_send_data(self):
+        text = self.send_input.text()
+        if not text:
+            return
+
+        # 1. 拦截未连接状态
+        if not self.serial_worker or getattr(self.serial_worker, 'serial',
+                                             None) is None or not self.serial_worker.serial.is_open:
+            QMessageBox.warning(self, "发送失败", "未连接到任何设备，请先打开串口！")
+            return
+
+        is_hex = self.radio_hex.isChecked()
+        add_newline = self.cb_send_newline.isChecked()
+
+        data_to_send = b''
+        echo_text = ""
+
+        try:
+            # ==========================================
+            # 🌟 模式一：处理 HEX 发送
+            # ==========================================
+            if is_hex:
+                import re
+                # 剔除所有的空格和无关键盘符号，只留 16 进制字符
+                clean_hex = re.sub(r'[^0-9a-fA-F]', '', text)
+                if len(clean_hex) % 2 != 0:
+                    QMessageBox.warning(self, "格式错误",
+                                        "HEX 模式下，输入的 16 进制字符数量必须是偶数！\n(例如: 0A 0B 0C)")
+                    return
+
+                data_to_send = bytes.fromhex(clean_hex)
+
+                # 如果勾选了发送新行，追加 0D 0A
+                if add_newline:
+                    data_to_send += b'\r\n'
+
+                # 构造漂亮的回显字符串：每个字节用空格隔开并大写
+                echo_text = " ".join(f"{b:02X}" for b in data_to_send)
+
+            # ==========================================
+            # 🌟 模式二：处理 ASCII 发送
+            # ==========================================
+            else:
+                str_to_send = text
+                if add_newline:
+                    str_to_send += '\r\n'
+
+                # 统一编码为 utf-8 发送
+                data_to_send = str_to_send.encode('utf-8', errors='replace')
+                # ASCII 模式下如果加了回车换行，回显时带个标记以便区分
+                echo_text = text if not add_newline else text + " \\r\\n"
+
+            # ==========================================
+            # 🌟 最终执行发送
+            # ==========================================
+            success, err_msg = self.serial_worker.send_data(data_to_send)
+
+            if success:
+                # 🌟 把发送的数据也塞进时光机
+                now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                self.terminal_history.append({'type': 'TX', 'time': now_str, 'data': data_to_send})
+
+                # UI 回显，强制跟随全局的 HEX 开关进行展示
+                if self.cb_hex_display.isChecked():
+                    display_text = "[上行] " + " ".join(f"{b:02X}" for b in data_to_send) + "\n"
+                else:
+                    display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
+
+                self.append_raw_log(display_text, custom_time=now_str)
+                self.send_input.selectAll()
+            else:
+                QMessageBox.critical(self, "发送失败", f"底层总线异常:\n{err_msg}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "数据转换错误", f"输入格式无法解析:\n{str(e)}")
+
     def _on_log_scrollbar_changed(self, value):
         scrollbar = self.raw_log_console.verticalScrollBar()
 
@@ -1311,27 +1457,19 @@ class EcuMainWindow(QMainWindow):
     # 🌟 自动搜索防抖逻辑
     # ==========================================
     def on_search_text_changed(self, text):
-        # 1. 只要用户还在打字，就立刻停掉之前的倒计时
         self.search_timer.stop()
-
-        # 2. 如果关键字被清空了，不需要等，立刻执行一次清理
         if not text:
             self.last_search_text = ""
             self._execute_search(backward=False)
             return
-
-        # 3. 停下手 300 毫秒后，触发真正的搜索 (可根据手速调整，300是黄金手感)
-        self.search_timer.start(1000)
+        # 🚀 将原来的 1000 毫秒等待，缩减为极速 100 毫秒！
+        self.search_timer.start(100)
 
     def _on_search_timer_timeout(self):
         keyword = self.search_input.text()
-
         if keyword == self.last_search_text:
             return
         self.last_search_text = keyword
-
-        # 🌟 核心修改：传入 is_typing_auto=True 标识这是打字触发的
-        # 不再通过光标 movePosition(Start) 干扰视口
         self._execute_search(backward=False, is_typing_auto=True)
 
     def search_next(self):
@@ -1340,55 +1478,99 @@ class EcuMainWindow(QMainWindow):
     def search_prev(self):
         self._execute_search(backward=True)
 
-    def _execute_search(self, backward=False, is_typing_auto=False):
-        from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
+    # ==========================================================
+    # 🚀 核心黑科技：只在当前屏幕可见范围内搜索并高亮 (WindTerm同款)
+    # ==========================================================
+    def update_viewport_search_highlights(self, *args):
         keyword = self.search_input.text()
-
-        if hasattr(self.raw_log_console, 'highlighter'):
-            self.raw_log_console.highlighter.set_search_keyword(keyword)
+        selections = []
 
         if not keyword:
-            self.raw_log_console.setExtraSelections([])
-            self.raw_log_console.viewport().update()
+            self.raw_log_console.setExtraSelections(selections)
             return
 
-        # ==========================================================
-        # 🌟 自动搜索拦截
+        # 问显卡要当前屏幕可见的顶部和底部光标！
+        viewport = self.raw_log_console.viewport()
+        from PyQt6.QtCore import QPoint
+        start_cursor = self.raw_log_console.cursorForPosition(QPoint(0, 0))
+        end_cursor = self.raw_log_console.cursorForPosition(QPoint(viewport.width(), viewport.height()))
+
+        start_block = start_cursor.block()
+        end_block = end_cursor.block()
+
+        from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor
+        from PyQt6.QtWidgets import QTextEdit
+
+        search_fmt = QTextCharFormat()
+        if getattr(self, 'is_dark_mode', True):
+            search_fmt.setBackground(QColor("#2E6A41"))
+            search_fmt.setForeground(QColor("#FFFFFF"))
+        else:
+            search_fmt.setBackground(QColor("#F472B6"))
+            search_fmt.setForeground(QColor("#000000"))
+
+        block = start_block
+        kw_lower = keyword.lower()
+        import re
+
+        # 重点：只在这几十行屏幕可见的文本里疯狂匹配
+        while block.isValid():
+            text = block.text()
+            if kw_lower in text.lower():
+                for m in re.finditer(re.escape(kw_lower), text.lower()):
+                    sel = QTextEdit.ExtraSelection()
+                    sel.format = search_fmt
+                    cursor = self.raw_log_console.textCursor()
+                    cursor.setPosition(block.position() + m.start())
+                    cursor.setPosition(block.position() + m.end(), QTextCursor.MoveMode.KeepAnchor)
+                    sel.cursor = cursor
+                    selections.append(sel)
+
+            if block == end_block:
+                break
+            block = block.next()
         # ==========================================
-        if is_typing_auto:
-            self.raw_log_console.setExtraSelections([])
-            self.raw_log_console.viewport().update()
+        # 🌟 核心修复：把“当前焦点的橙色高亮”最后放进去！
+        # 这样它就会像图层最上方的贴纸一样，绝对不会被绿色盖住。
+        # ==========================================
+        if hasattr(self, 'current_search_hit_selection') and self.current_search_hit_selection:
+            selections.append(self.current_search_hit_selection)
+        self.raw_log_console.setExtraSelections(selections)
+
+    def _execute_search(self, backward=False, is_typing_auto=False):
+        from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
+        from PyQt6.QtWidgets import QTextEdit
+        keyword = self.search_input.text()
+
+        if not keyword:
+            self.current_search_hit_selection = None
+            self.update_viewport_search_highlights()
             return
 
-            # ... (中间的 current_extra 寻找和执行 find() 的代码完全保持不变) ...
+        # 💡 如果是打字触发的，绝不滚动屏幕跳跃，只在当前屏幕画绿框！
+        if is_typing_auto:
+            self.current_search_hit_selection = None
+            self.update_viewport_search_highlights()
+            return
 
-        # ==========================================================
-        # 🌟 核心修复：根据“橙色方块”的位置强制跳出
-        # ==========================================================
-        # 即使蓝色选中被清除了，橙色方块（ExtraSelection）还在。
-        # 我们利用它来告诉光标：别在原地打转，往后/往前挪一步再搜！
+        # --- 以下是点击 上下箭头 的真实物理跳跃 ---
         current_extra = self.raw_log_console.extraSelections()
         physic_cursor = self.raw_log_console.textCursor()
 
-        if current_extra:
-            # 获取当前显示的那个橙色方块的光标位置
-            last_res_cursor = current_extra[0].cursor
+        if hasattr(self, 'current_search_hit_selection') and self.current_search_hit_selection:
+            last_res_cursor = self.current_search_hit_selection.cursor
             if backward:
-                # 向上搜：强制把光标挪到当前橙色块的“左边界”
                 physic_cursor.setPosition(last_res_cursor.selectionStart())
             else:
-                # 向下搜：强制把光标挪到当前橙色块的“右边界”
                 physic_cursor.setPosition(last_res_cursor.selectionEnd())
             self.raw_log_console.setTextCursor(physic_cursor)
 
-        # 2. 执行搜索
         options = QTextDocument.FindFlag(0)
         if backward:
             options |= QTextDocument.FindFlag.FindBackward
 
         found = self.raw_log_console.find(keyword, options)
 
-        # 3. 循环搜索逻辑 (Wrap around)
         if not found:
             loop_cursor = self.raw_log_console.textCursor()
             if backward:
@@ -1398,21 +1580,17 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setTextCursor(loop_cursor)
             found = self.raw_log_console.find(keyword, options)
 
-        # 4. 处理结果
         if found:
-            # 拿到新命中的位置
             new_hit_cursor = self.raw_log_console.textCursor()
             sel_start = new_hit_cursor.selectionStart()
             sel_end = new_hit_cursor.selectionEnd()
 
-            # 💡 物理定位：清除蓝色选中，并停留在正确边缘
             if backward:
                 new_hit_cursor.setPosition(sel_start)
             else:
                 new_hit_cursor.setPosition(sel_end)
             self.raw_log_console.setTextCursor(new_hit_cursor)
 
-            # 🎨 渲染新的橙色方块
             selection = QTextEdit.ExtraSelection()
             selection.format.setBackground(QColor("#FF9800"))
             selection.format.setForeground(QColor("#000000"))
@@ -1422,20 +1600,20 @@ class EcuMainWindow(QMainWindow):
             render_cursor.setPosition(sel_end, QTextCursor.MoveMode.KeepAnchor)
             selection.cursor = render_cursor
 
-            # 更新高亮（这会覆盖旧的橙色方块）
-            self.raw_log_console.setExtraSelections([selection])
+            self.current_search_hit_selection = selection
 
-            # 滚动与焦点
             self.raw_log_console.setFocus()
             self.raw_log_console.ensureCursorVisible()
             self.search_input.setStyleSheet("")
             if self.cb_auto_scroll.isChecked():
                 self.cb_auto_scroll.setChecked(False)
+
+            # 更新背景高亮
+            self.update_viewport_search_highlights()
         else:
             self.search_input.setStyleSheet("border: 1px solid #EF4444;")
-            self.raw_log_console.setExtraSelections([])
-
-        self.raw_log_console.viewport().update()
+            self.current_search_hit_selection = None
+            self.update_viewport_search_highlights()
 
     # ==========================================
     # 其他业务逻辑 (数据接入、文件导出等)
@@ -1500,28 +1678,48 @@ class EcuMainWindow(QMainWindow):
         # 🌟 优化：彻底清空断开瞬间残留在内存中的半截字符串
         self.serial_buffer_line = ""
 
-    def append_raw_log(self, text):
-        if self.cb_timestamp.isChecked():
-            now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            time_prefix = f"[{now_str}] "
-            processed_text = ""
-            if self._last_char_was_newline: processed_text += time_prefix
-            processed_text += text.replace('\n', f'\n{time_prefix}')
-            if processed_text.endswith(time_prefix): processed_text = processed_text[:-len(time_prefix)]
-            self._last_char_was_newline = text.endswith('\n')
-            final_text = processed_text
-        else:
-            final_text = text
-            self._last_char_was_newline = text.endswith('\n')
+    def append_raw_log(self, text, custom_time=None, write_to_file=True):
+        if not text:
+            return
 
-            # 🌟 优化：直接使用持久化的句柄写入并刷入硬盘，彻底解决频繁开闭文件的 IO 瓶颈
-        if getattr(self, 'is_recording', False) and hasattr(self, 'record_file_handle') and self.record_file_handle:
+        clean_text = text.strip('\r\n')
+        if not clean_text:
+            return
+
+        is_empty = self.raw_log_console.document().isEmpty()
+
+        # ==========================================
+        # 智能时间戳逻辑 (支持时光倒流重绘)
+        # ==========================================
+        if self.cb_timestamp.isChecked():
+            # 🌟 核心：如果传入了历史时间，就用历史时间；否则取当前真实时间
+            time_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            time_prefix = f"[{time_str}] "
+
+            if is_empty:
+                final_text = time_prefix + clean_text
+            else:
+                final_text = "\n\n" + time_prefix + clean_text
+        else:
+            if is_empty:
+                final_text = clean_text
+            else:
+                final_text = "\n\n" + clean_text
+
+        # ==========================================
+        # 文件写入控制 (重绘历史时禁止写入，防止文件内容重复)
+        # ==========================================
+        if write_to_file and getattr(self, 'is_recording', False) and hasattr(self,
+                                                                              'record_file_handle') and self.record_file_handle:
             try:
                 self.record_file_handle.write(final_text)
-                self.record_file_handle.flush()  # 确保实时写入硬盘，防止断电丢失
+                self.record_file_handle.flush()
             except:
                 pass
 
+        # ==========================================
+        # UI 渲染 (保持不变)
+        # ==========================================
         scrollbar = self.raw_log_console.verticalScrollBar()
         current_scroll = scrollbar.value()
         cursor = self.raw_log_console.textCursor()
@@ -1529,7 +1727,9 @@ class EcuMainWindow(QMainWindow):
 
         block_format = QTextBlockFormat()
         block_format.setBottomMargin(8)
+        import re
         if re.search(r"(?i)(error|fail|timeout|异常|失败)", final_text):
+            from PyQt6.QtGui import QColor
             bg_color = QColor("#4A0000") if self.is_dark_mode else QColor("#FFCCCC")
             block_format.setBackground(bg_color)
         cursor.setBlockFormat(block_format)
@@ -1541,9 +1741,57 @@ class EcuMainWindow(QMainWindow):
         else:
             scrollbar.setValue(current_scroll)
 
-    def on_serial_data_received(self, text):
-        self.append_raw_log(text)
-        self.serial_buffer_line += text
+    # ==========================================
+    # 🌟 核心：历史数据重绘引擎
+    # ==========================================
+    def redraw_terminal_history(self):
+        # 1. 冻结终端的 UI 更新，防止几千行数据重绘时屏幕狂闪
+        self.raw_log_console.setUpdatesEnabled(False)
+        self.raw_log_console.clear()
+
+        is_hex = self.cb_hex_display.isChecked()
+
+        # 2. 遍历底层的二进制数据队列，重新格式化
+        for pkt in self.terminal_history:
+            raw_bytes = pkt['data']
+            if is_hex:
+                text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
+                if pkt['type'] == 'TX': text = "[上行] " + text
+            else:
+                text = raw_bytes.decode('utf-8', errors='replace')
+                if pkt['type'] == 'TX': text = "[上行] " + text
+
+            # 传入历史时间戳，并且禁止写入文件 (write_to_file=False)
+            self.append_raw_log(text, custom_time=pkt['time'], write_to_file=False)
+
+        # 3. 恢复 UI 更新，并一脚踢到最底部
+        self.raw_log_console.setUpdatesEnabled(True)
+        scrollbar = self.raw_log_console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def on_serial_data_received(self, raw_bytes):
+        # ==========================================
+        # 🌟 1. 处理 UI 屏幕显示 (支持历史存储)
+        # ==========================================
+        now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        # 把最纯净的字节流塞进时光机
+        self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
+
+        if hasattr(self, 'cb_hex_display') and self.cb_hex_display.isChecked():
+            display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
+        else:
+            display_text = raw_bytes.decode('utf-8', errors='replace')
+
+        # 传入带有当前真实时间的字符串
+        self.append_raw_log(display_text, custom_time=now_str)
+
+        # ==========================================
+        # 🌟 2. 处理后台解析引擎 (不受 UI 开关影响)
+        # ==========================================
+        # 为了兼容原有的正则解析逻辑，我们将字节流解码为文本后喂给解析器池
+        text_for_parser = raw_bytes.decode('utf-8', errors='replace')
+        self.serial_buffer_line += text_for_parser
+
         if '\n' in self.serial_buffer_line:
             lines = self.serial_buffer_line.split('\n')
             self.serial_buffer_line = lines.pop()
