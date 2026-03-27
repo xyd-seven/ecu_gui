@@ -957,12 +957,28 @@ class EcuMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ECU串口解析工具")
+
         # ==========================================
-        # 🌟 新增：设置窗口左上角和任务栏图标
+        # 🌟 动态获取资源路径 (兼容本地开发与 PyInstaller 打包)
         # ==========================================
         import os
-        if os.path.exists("logo.ico"):
-            self.setWindowIcon(QIcon("logo.ico"))
+        import sys
+
+        def resource_path(relative_path):
+            """获取资源的绝对路径"""
+            try:
+                # PyInstaller 创建的临时文件夹路径存放在 sys._MEIPASS 中
+                base_path = sys._MEIPASS
+            except Exception:
+                # 如果不是打包环境，就使用当前工作目录
+                base_path = os.path.abspath(".")
+            return os.path.join(base_path, relative_path)
+
+        # 使用动态路径加载图标
+        icon_path = resource_path("logo.ico")
+        if os.path.exists(icon_path):
+            from PyQt6.QtGui import QIcon
+            self.setWindowIcon(QIcon(icon_path))
 
         self.resize(1300, 800)
 
@@ -1421,32 +1437,6 @@ class EcuMainWindow(QMainWindow):
 
         self.raw_log_console.viewport().update()
 
-    def _update_minimap_internal(self, keyword, is_typing_auto=False):
-        if not keyword:
-            self.raw_log_console.minimap_highlights = []
-            return
-
-        # 🚀 核心优化 3：智能熔断保护！
-        doc = self.raw_log_console.document()
-        if is_typing_auto and doc.blockCount() > 10000:
-            # 如果是打字触发的，并且日志超过1万行，直接跳过雷达图全量提取以防止卡死！
-            # 当你敲下回车键时 (is_typing_auto=False)，它才会进行全局雷达图计算。
-            return
-
-        # 使用 str.find 代替逐行遍历，速度提升百倍
-        text = self.raw_log_console.toPlainText()
-        highlights = []
-        pos = 0
-
-        # 限制雷达图扫描前100万字，保护大数据量性能
-        if len(text) < 1000000:
-            while True:
-                pos = text.find(keyword, pos)
-                if pos == -1: break
-                highlights.append(self.raw_log_console.document().findBlock(pos).blockNumber())
-                pos += len(keyword)
-        self.raw_log_console.minimap_highlights = list(set(highlights))
-
     # ==========================================
     # 其他业务逻辑 (数据接入、文件导出等)
     # ==========================================
@@ -1507,6 +1497,8 @@ class EcuMainWindow(QMainWindow):
         self.combo_baud.setEnabled(True)
         self.statusBar().showMessage("状态: 串口已安全关闭")
         self.current_log_filename = None
+        # 🌟 优化：彻底清空断开瞬间残留在内存中的半截字符串
+        self.serial_buffer_line = ""
 
     def append_raw_log(self, text):
         if self.cb_timestamp.isChecked():
@@ -1522,10 +1514,11 @@ class EcuMainWindow(QMainWindow):
             final_text = text
             self._last_char_was_newline = text.endswith('\n')
 
-        if getattr(self, 'is_recording', False) and self.record_filename:
+            # 🌟 优化：直接使用持久化的句柄写入并刷入硬盘，彻底解决频繁开闭文件的 IO 瓶颈
+        if getattr(self, 'is_recording', False) and hasattr(self, 'record_file_handle') and self.record_file_handle:
             try:
-                with open(self.record_filename, 'a', encoding='utf-8', errors='ignore') as f:
-                    f.write(final_text)
+                self.record_file_handle.write(final_text)
+                self.record_file_handle.flush()  # 确保实时写入硬盘，防止断电丢失
             except:
                 pass
 
@@ -1534,7 +1527,6 @@ class EcuMainWindow(QMainWindow):
         cursor = self.raw_log_console.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
-        # 🌟 满血版行间距 & 整行级错误高亮！
         block_format = QTextBlockFormat()
         block_format.setBottomMargin(8)
         if re.search(r"(?i)(error|fail|timeout|异常|失败)", final_text):
@@ -1611,18 +1603,25 @@ class EcuMainWindow(QMainWindow):
                                                       "Text Files (*.txt);;All Files (*)")
             if not filename: return
             self.record_filename = filename
-            self.is_recording = True
 
-            # 更改菜单里的文字
-            self.action_record.setText("⏹️ 停止实时录制")
-            # 💡 让最外层的“更多”按钮变红，起到警示作用
-            self.btn_more.setText("🔴 录制中")
-            self.btn_more.setStyleSheet("color: #EF4444; font-weight: bold;")
+            # 🌟 优化：保持文件句柄处于打开状态，采用 'a' 追加模式
+            try:
+                self.record_file_handle = open(self.record_filename, 'a', encoding='utf-8', errors='ignore')
+                self.is_recording = True
+                self.action_record.setText("⏹️ 停止实时录制")
+                self.btn_more.setText("🔴 录制中")
+                self.btn_more.setStyleSheet("color: #EF4444; font-weight: bold;")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"无法创建文件: {e}")
         else:
             self.is_recording = False
             self.record_filename = ""
 
-            # 恢复原状
+            # 🌟 优化：停止时安全关闭文件句柄
+            if hasattr(self, 'record_file_handle') and self.record_file_handle:
+                self.record_file_handle.close()
+                self.record_file_handle = None
+
             self.action_record.setText("⏺️ 开始实时录制")
             self.btn_more.setText("⋮ 更多")
             self.btn_more.setStyleSheet("")
@@ -1768,6 +1767,7 @@ class EcuMainWindow(QMainWindow):
             selection-background-color: #93A1A1;  /* 选中时使用护眼莫兰迪灰绿 */
             selection-color: #FFFFFF; 
             alternate-background-color: #F6EFCF;  /* 淡淡的泛黄隔行变色 */
+            font-family: Consolas, "Microsoft YaHei"; /* 🌟 新增：表格等宽排版 */
         }
 
         /* 🌟 字段解析树状图 */
@@ -1777,6 +1777,7 @@ class EcuMainWindow(QMainWindow):
             border: 1px solid #D6D0BA; 
             selection-background-color: #93A1A1; 
             selection-color: #FFFFFF; 
+            font-family: Consolas, "Microsoft YaHei"; /* 🌟 新增：树状图等宽排版 */
         }
 
         /* 表头：底色加深，形成视觉分层 */
@@ -1810,6 +1811,7 @@ class EcuMainWindow(QMainWindow):
             selection-background-color: #2F65CA; 
             selection-color: #FFFFFF; 
             alternate-background-color: #414446; /* 💡 隔行变色的浅色底 */
+            font-family: Consolas, "Microsoft YaHei"; /* 🌟 新增：表格等宽排版 */
         }
 
         /* ======================================================== */
@@ -1821,6 +1823,7 @@ class EcuMainWindow(QMainWindow):
             border: 1px solid #43454A; 
             selection-background-color: #2F65CA; 
             selection-color: #FFFFFF; 
+            font-family: Consolas, "Microsoft YaHei"; /* 🌟 新增：树状图等宽排版 */
         }
 
         QHeaderView::section { background-color: #2b2d30; color: #a9b7c6; border: none; border-right: 1px solid #43454a; border-bottom: 1px solid #43454a; padding: 4px; font-weight: bold; }
