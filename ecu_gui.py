@@ -1121,7 +1121,7 @@ class EcuMainWindow(QMainWindow):
         self.cb_filter_mode = QPushButton("🎯 过滤")
         self.cb_filter_mode.setCheckable(True)
         self.cb_filter_mode.setToolTip("开启/关闭仅显匹配行")
-        self.cb_filter_mode.toggled.connect(self.apply_log_filter)
+        self.cb_filter_mode.toggled.connect(lambda checked: self.redraw_terminal_history())
 
         self.cb_timestamp = QPushButton("⏱️ 时戳")
         self.cb_timestamp.setCheckable(True)
@@ -1388,17 +1388,26 @@ class EcuMainWindow(QMainWindow):
             success, err_msg = self.serial_worker.send_data(data_to_send)
 
             if success:
-                # 🌟 把发送的数据也塞进时光机
                 now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
                 self.terminal_history.append({'type': 'TX', 'time': now_str, 'data': data_to_send})
 
-                # UI 回显，强制跟随全局的 HEX 开关进行展示
                 if self.cb_hex_display.isChecked():
                     display_text = "[上行] " + " ".join(f"{b:02X}" for b in data_to_send) + "\n"
                 else:
                     display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
 
-                self.append_raw_log(display_text, custom_time=now_str)
+                # 同理增加过滤拦截
+                filter_kw = self.search_input.text().lower()
+                allow_render = True
+                # 判断界面上的过滤复选框是否被勾选
+                is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+
+                if is_filtering:
+                    filter_kw = self.search_input.text().lower()
+                    if filter_kw and filter_kw not in display_text.lower():
+                        allow_render = False  # 不包含关键词，拒绝上屏！
+
+                self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
                 self.send_input.selectAll()
             else:
                 QMessageBox.critical(self, "发送失败", f"底层总线异常:\n{err_msg}")
@@ -1430,28 +1439,6 @@ class EcuMainWindow(QMainWindow):
             # 用户点保存后，立即重新加载并上色
             if hasattr(self.raw_log_console, 'highlighter'):
                 self.raw_log_console.highlighter.update_theme(self.is_dark_mode)
-
-    def apply_log_filter(self):
-        keyword = self.search_input.text()
-        filter_on = self.cb_filter_mode.isChecked()
-        self.raw_log_console.setUpdatesEnabled(False)
-        doc = self.raw_log_console.document()
-        block = doc.firstBlock()
-        kw_lower = keyword.lower()
-
-        while block.isValid():
-            if not filter_on or not keyword:
-                block.setVisible(True)
-            else:
-                block.setVisible(kw_lower in block.text().lower())
-            block = block.next()
-
-        self.raw_log_console.viewport().update()
-        self.raw_log_console.setUpdatesEnabled(True)
-        if filter_on:
-            self.statusBar().showMessage(f"🎯 过滤模式：仅显示包含 '{keyword}' 的行")
-        else:
-            self.statusBar().showMessage("🌐 恢复显示全部日志")
 
     # ==========================================
     # 🌟 自动搜索防抖逻辑
@@ -1541,6 +1528,15 @@ class EcuMainWindow(QMainWindow):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         from PyQt6.QtWidgets import QTextEdit
         keyword = self.search_input.text()
+        # ==========================================
+        # 🌟 智能分流：如果当前是“过滤模式”，打字会触发全屏过滤重绘！
+        # ==========================================
+        is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+        if is_filtering:
+            if is_typing_auto:
+                # 只要打字手一停，立刻从历史里把过滤结果洗出来！
+                self.redraw_terminal_history()
+            return  # 过滤模式下，直接结束，不走下面的物理跳转逻辑
 
         if not keyword:
             self.current_search_hit_selection = None
@@ -1678,7 +1674,7 @@ class EcuMainWindow(QMainWindow):
         # 🌟 优化：彻底清空断开瞬间残留在内存中的半截字符串
         self.serial_buffer_line = ""
 
-    def append_raw_log(self, text, custom_time=None, write_to_file=True):
+    def append_raw_log(self, text, custom_time=None, write_to_file=True, render_to_ui=True):
         if not text:
             return
 
@@ -1688,26 +1684,16 @@ class EcuMainWindow(QMainWindow):
 
         is_empty = self.raw_log_console.document().isEmpty()
 
-        # ==========================================
-        # 智能时间戳逻辑 (支持时光倒流重绘)
-        # ==========================================
+        # 1. 组装最终带有时间戳的文本
         if self.cb_timestamp.isChecked():
-            # 🌟 核心：如果传入了历史时间，就用历史时间；否则取当前真实时间
             time_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
             time_prefix = f"[{time_str}] "
-
-            if is_empty:
-                final_text = time_prefix + clean_text
-            else:
-                final_text = "\n\n" + time_prefix + clean_text
+            final_text = time_prefix + clean_text if is_empty else "\n\n" + time_prefix + clean_text
         else:
-            if is_empty:
-                final_text = clean_text
-            else:
-                final_text = "\n\n" + clean_text
+            final_text = clean_text if is_empty else "\n\n" + clean_text
 
         # ==========================================
-        # 文件写入控制 (重绘历史时禁止写入，防止文件内容重复)
+        # 🌟 2. 永远优先写盘 (保证本地录制的 log 文件是 100% 完整的)
         # ==========================================
         if write_to_file and getattr(self, 'is_recording', False) and hasattr(self,
                                                                               'record_file_handle') and self.record_file_handle:
@@ -1718,8 +1704,12 @@ class EcuMainWindow(QMainWindow):
                 pass
 
         # ==========================================
-        # UI 渲染 (保持不变)
+        # 🚀 3. 性能护城河：如果被过滤掉了，到此为止，绝不消耗显卡和 CPU 去渲染！
         # ==========================================
+        if not render_to_ui:
+            return
+
+        # 4. 只有通过过滤的数据，才进入极其消耗资源的 UI 渲染环节
         scrollbar = self.raw_log_console.verticalScrollBar()
         current_scroll = scrollbar.value()
         cursor = self.raw_log_console.textCursor()
@@ -1745,29 +1735,47 @@ class EcuMainWindow(QMainWindow):
     # 🌟 核心：历史数据重绘引擎
     # ==========================================
     def redraw_terminal_history(self):
-        # 1. 冻结终端的 UI 更新，防止几千行数据重绘时屏幕狂闪
-        self.raw_log_console.setUpdatesEnabled(False)
-        self.raw_log_console.clear()
+        try:
+            self.raw_log_console.setUpdatesEnabled(False)
+            self.raw_log_console.clear()
 
-        is_hex = self.cb_hex_display.isChecked()
+            is_hex = hasattr(self, 'cb_hex_display') and self.cb_hex_display.isChecked()
+            is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+            filter_kw = self.search_input.text().lower()
 
-        # 2. 遍历底层的二进制数据队列，重新格式化
-        for pkt in self.terminal_history:
-            raw_bytes = pkt['data']
-            if is_hex:
-                text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
-                if pkt['type'] == 'TX': text = "[上行] " + text
-            else:
-                text = raw_bytes.decode('utf-8', errors='replace')
-                if pkt['type'] == 'TX': text = "[上行] " + text
+            for pkt in self.terminal_history:
+                raw_bytes = pkt['data']
+                if is_hex:
+                    text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
+                    if pkt.get('type') == 'TX': text = "[上行] " + text
+                else:
+                    text = raw_bytes.decode('utf-8', errors='replace')
+                    if pkt.get('type') == 'TX': text = "[上行] " + text
 
-            # 传入历史时间戳，并且禁止写入文件 (write_to_file=False)
-            self.append_raw_log(text, custom_time=pkt['time'], write_to_file=False)
+                # ==========================================
+                # 🌟 核心升级：行级精准过滤
+                # ==========================================
+                if is_filtering and filter_kw:
+                    # 1. 把这一大包数据按换行符拆成多行
+                    lines = text.split('\n')
+                    # 2. 只有包含搜索词的行，才有资格活下来
+                    matched_lines = [line for line in lines if filter_kw in line.lower()]
 
-        # 3. 恢复 UI 更新，并一脚踢到最底部
-        self.raw_log_console.setUpdatesEnabled(True)
-        scrollbar = self.raw_log_console.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+                    if not matched_lines:
+                        continue  # 如果全都不匹配，这整包彻底丢弃
+
+                    # 3. 把幸存的行重新拼装起来
+                    text = "\n".join(matched_lines)
+
+                self.append_raw_log(text, custom_time=pkt.get('time'), write_to_file=False, render_to_ui=True)
+
+        except Exception as e:
+            print(f"🚨 重绘引擎异常: {e}")
+        finally:
+            self.raw_log_console.setUpdatesEnabled(True)
+            scrollbar = self.raw_log_console.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+            self.update_viewport_search_highlights()
 
     def on_serial_data_received(self, raw_bytes):
         # ==========================================
@@ -1781,9 +1789,33 @@ class EcuMainWindow(QMainWindow):
             display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
         else:
             display_text = raw_bytes.decode('utf-8', errors='replace')
+        # ==========================================
+        # 🌟 核心拦截：实时比对过滤关键词
+        # ==========================================
+        # 这里替换成您界面上实际用于过滤的关键词获取方式，例如：
+        filter_kw = self.search_input.text().lower()
 
-        # 传入带有当前真实时间的字符串
-        self.append_raw_log(display_text, custom_time=now_str)
+        # ==========================================
+        # 🌟 核心拦截：只在开启“过滤模式”时才执行拦截！
+        # ==========================================
+        allow_render = True
+        is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+
+        if is_filtering:
+            filter_kw = self.search_input.text().lower()
+            if filter_kw:
+                # 1. 将刚收到的这包数据切分
+                lines = display_text.split('\n')
+                # 2. 剔除无关行
+                matched_lines = [line for line in lines if filter_kw in line.lower()]
+
+                if not matched_lines:
+                    allow_render = False  # 全军覆没，直接拦截不上屏
+                else:
+                    # 3. 重新组装，保证只把 GBGGA 这一行传给 UI 渲染
+                    display_text = "\n".join(matched_lines)
+        # 传入带有当前真实时间的字符串，并由 allow_render 决定是否上屏
+        self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
 
         # ==========================================
         # 🌟 2. 处理后台解析引擎 (不受 UI 开关影响)
