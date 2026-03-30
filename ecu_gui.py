@@ -321,7 +321,7 @@ class TerminalTextEdit(QTextEdit):
                 self.main_window.action_autoscroll.setChecked(False)
                 self.main_window.statusBar().showMessage("⏬ 自动滚动已暂停 (手动滑屏)", 2000)
 
-            super().wheelEvent(event)
+        super().wheelEvent(event)
 
 
 class AutoScrollTableView(QTableView):
@@ -1432,6 +1432,8 @@ class EcuMainWindow(QMainWindow):
         self.search_input.setMaximumWidth(250)
         self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_input.textChanged.connect(self.on_search_text_changed)
+        # 👇 加上这一行：输入完关键字直接敲回车，自动找下一个！
+        self.search_input.returnPressed.connect(self.search_next)
 
         self.btn_search_prev = QPushButton("⬆️")
         self.btn_search_prev.setToolTip("向上查找")
@@ -1490,7 +1492,7 @@ class EcuMainWindow(QMainWindow):
 
         self.action_hex = QAction("🔢 HEX 原始字节显示", self)
         self.action_hex.setCheckable(True)
-        self.action_hex.triggered.connect(self.redraw_terminal_history)
+        self.action_hex.triggered.connect(lambda checked=False: self.redraw_terminal_history())
 
         self.action_autoscroll = QAction("⏬ 接收时自动滚动到底部", self)
         self.action_autoscroll.setCheckable(True)
@@ -1998,9 +2000,9 @@ class EcuMainWindow(QMainWindow):
                     display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
 
                 # 过滤拦截逻辑
-                filter_kw = self.search_input.text().lower()
                 allow_render = True
-                is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
+                # 🌟 修复：检查新变量 btn_filter_mode
+                is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
 
                 if is_filtering:
                     filter_kw = self.search_input.text().lower()
@@ -2127,7 +2129,7 @@ class EcuMainWindow(QMainWindow):
     def _execute_search(self, backward=False, is_typing_auto=False):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         from PyQt6.QtWidgets import QTextEdit
-        self.raw_log_console._is_searching = True
+
         keyword = self.search_input.text()
         # ==========================================
         # 🌟 智能分流：如果当前是“过滤模式”，打字会触发全屏过滤重绘！
@@ -2149,6 +2151,8 @@ class EcuMainWindow(QMainWindow):
             self.current_search_hit_selection = None
             self.update_viewport_search_highlights()
             return
+
+        self.raw_log_console._is_searching = True
 
         # --- 以下是点击 上下箭头 的真实物理跳跃 ---
         current_extra = self.raw_log_console.extraSelections()
@@ -2212,6 +2216,7 @@ class EcuMainWindow(QMainWindow):
             self.search_input.setStyleSheet("border: 1px solid #EF4444;")
             self.current_search_hit_selection = None
             self.update_viewport_search_highlights()
+        from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, lambda: setattr(self.raw_log_console, '_is_searching', False))
 
     # ==========================================
@@ -2411,8 +2416,9 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setUpdatesEnabled(False)
             self.raw_log_console.clear()
 
-            is_hex = hasattr(self, 'cb_hex_display') and self.action_hex.isChecked()
-            is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
+            # 🌟 修复：检查新变量 action_hex 和 btn_filter_mode
+            is_hex = hasattr(self, 'action_hex') and self.action_hex.isChecked()
+            is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
             filter_kw = self.search_input.text().lower()
 
             for pkt in self.terminal_history:
@@ -2424,19 +2430,11 @@ class EcuMainWindow(QMainWindow):
                     text = raw_bytes.decode('utf-8', errors='replace')
                     if pkt.get('type') == 'TX': text = "[上行] " + text
 
-                # ==========================================
-                # 🌟 核心升级：行级精准过滤
-                # ==========================================
                 if is_filtering and filter_kw:
-                    # 1. 把这一大包数据按换行符拆成多行
                     lines = text.split('\n')
-                    # 2. 只有包含搜索词的行，才有资格活下来
                     matched_lines = [line for line in lines if filter_kw in line.lower()]
-
                     if not matched_lines:
-                        continue  # 如果全都不匹配，这整包彻底丢弃
-
-                    # 3. 把幸存的行重新拼装起来
+                        continue
                     text = "\n".join(matched_lines)
 
                 self.append_raw_log(text, custom_time=pkt.get('time'), write_to_file=False, render_to_ui=True)
@@ -2450,64 +2448,37 @@ class EcuMainWindow(QMainWindow):
             self.update_viewport_search_highlights()
 
     def on_serial_data_received(self, raw_bytes):
-        # ==========================================
-        # 🌟 1. 处理 UI 屏幕显示 (支持历史存储)
-        # ==========================================
         now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        # 把最纯净的字节流塞进时光机
         self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
 
-        if hasattr(self, 'cb_hex_display') and self.action_hex.isChecked():
+        # 🌟 修复：检查新变量 action_hex
+        if hasattr(self, 'action_hex') and self.action_hex.isChecked():
             display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
         else:
             display_text = raw_bytes.decode('utf-8', errors='replace')
-
-            # ==========================================
-            # 🌟 升级版：对纯 ASCII 文本进行正则变量提取 (支持嗅探 2D 坐标对)
-            # ==========================================
             text_vars = self._sniff_raw_text_vars(display_text)
-
-            # 检查是否有我们要画的波形或轨迹变量
             target_var = self.combo_wave_var.currentText()
             if target_var and target_var != "关闭绘制" and getattr(self, 'waveform_panel',
                                                                    None) and self.waveform_panel.isVisible():
                 if target_var in text_vars:
-                    # ==========================================
-                    # 🚀 核心修改：抛弃手动 append，直接丢给统一渲染引擎
-                    # 引擎会自动判断这是 1D 数字，还是 2D 坐标组 (X, Y)，并画出靶心！
-                    # ==========================================
                     self.update_plot_data(text_vars[target_var])
-        # ==========================================
-        # 🌟 核心拦截：实时比对过滤关键词
-        # ==========================================
-        # 这里替换成您界面上实际用于过滤的关键词获取方式，例如：
-        filter_kw = self.search_input.text().lower()
 
-        # ==========================================
-        # 🌟 核心拦截：只在开启“过滤模式”时才执行拦截！
-        # ==========================================
         allow_render = True
-        is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
+        # 🌟 修复：检查新变量 btn_filter_mode
+        is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
 
         if is_filtering:
             filter_kw = self.search_input.text().lower()
             if filter_kw:
-                # 1. 将刚收到的这包数据切分
                 lines = display_text.split('\n')
-                # 2. 剔除无关行
                 matched_lines = [line for line in lines if filter_kw in line.lower()]
-
                 if not matched_lines:
-                    allow_render = False  # 全军覆没，直接拦截不上屏
+                    allow_render = False
                 else:
-                    # 3. 重新组装，保证只把 GBGGA 这一行传给 UI 渲染
                     display_text = "\n".join(matched_lines)
-        # 传入带有当前真实时间的字符串，并由 allow_render 决定是否上屏
+
         self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
 
-        # ==========================================
-        # 🌟 性能护城河：纯文本模式下，在此处直接截断，不进入底层解析引擎！
-        # ==========================================
         if self.combo_protocol.currentText() == "纯文本(不解析)":
             return
 
@@ -2625,12 +2596,10 @@ class EcuMainWindow(QMainWindow):
         if self.rt_rx_parser: self.rt_rx_parser.buffer.clear()
         self.serial_buffer_line = ""
 
-    def toggle_word_wrap(self, state):
-        """智能切换终端的换行模式"""
+    def toggle_word_wrap(self, checked):
+        """智能切换终端的换行模式 (兼容 QAction 布尔值)"""
         from PyQt6.QtWidgets import QTextEdit
-        from PyQt6.QtCore import Qt
-        if state == Qt.CheckState.Checked.value:
-            # 🌟 名字统一换成 raw_log_console
+        if checked:
             self.raw_log_console.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         else:
             self.raw_log_console.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
