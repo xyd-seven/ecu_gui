@@ -17,6 +17,15 @@ except ImportError:
     print("未检测到 pyserial 库！请运行: pip install pyserial")
     sys.exit(1)
 
+# ==========================================
+# 🌟 新增：极速波形绘图库
+# ==========================================
+try:
+    import pyqtgraph as pg
+except ImportError:
+    print("未检测到 pyqtgraph 库！将无法使用波形图功能。请运行: pip install pyqtgraph")
+    pg = None
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
                              QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
@@ -990,6 +999,15 @@ class EcuMainWindow(QMainWindow):
         # 使用双端队列，最多保存最近的 2000 包数据，避免长时间挂机导致内存溢出
         self.terminal_history = deque(maxlen=2000)
 
+        # ==========================================
+        # 🌟 新增：波形图数据结构 (最多缓存 1000 个点，保证极速)
+        # ==========================================
+        self.known_wave_vars = set()
+        # 🌟 升级：为支持 2D 轨迹，拆分为 X/Y 两个独立队列
+        self.wave_data_x = deque(maxlen=1000)
+        self.wave_data_y = deque(maxlen=1000)
+        self.latest_scatter = None  # 靶心图层图柄
+
         # 🌟 新增：防抖定时器与状态记忆
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)  # 设置为单次触发
@@ -1077,6 +1095,15 @@ class EcuMainWindow(QMainWindow):
         self.btn_toggle_send.clicked.connect(self.toggle_send_panel)
         top_bar_layout.addWidget(self.btn_toggle_send)
 
+        # ==========================================
+        # 🌟 插入点 1：波形图显隐控制按钮
+        # ==========================================
+        self.btn_toggle_wave_main = QPushButton("📈 实时波形")
+        self.btn_toggle_wave_main.setCheckable(True)
+        self.btn_toggle_wave_main.setChecked(False)
+        self.btn_toggle_wave_main.clicked.connect(self.toggle_waveform_panel)
+        top_bar_layout.addWidget(self.btn_toggle_wave_main)
+
         main_layout.addLayout(top_bar_layout)
 
         # 三屏联动布局
@@ -1084,10 +1111,12 @@ class EcuMainWindow(QMainWindow):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # ==========================================
-        # 🌟 1. 左侧终端面板提升为 self 属性
+        # 🌟 1. 左侧终端面板提升为上下分割器 (支持波形图)
         # ==========================================
-        self.left_panel = QWidget()
-        left_layout = QVBoxLayout(self.left_panel)
+        self.left_panel = QSplitter(Qt.Orientation.Vertical)
+
+        term_container = QWidget()
+        left_layout = QVBoxLayout(term_container)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         term_toolbar = QHBoxLayout()
@@ -1199,6 +1228,22 @@ class EcuMainWindow(QMainWindow):
         self.cb_send_newline = QCheckBox("发送新行(\\r\\n)")
         self.cb_send_newline.setChecked(True)
 
+        # ==========================================
+        # 🌟 插入点：新增动态校验和下拉框
+        # ==========================================
+        self.combo_checksum = QComboBox()
+        self.combo_checksum.addItems([
+            "无校验",
+            "CheckSum-8 (ADD)",
+            "CheckSum-8 (XOR / BCC)",
+            "CheckSum-16 (ADD)",
+            "CRC8 (Standard)",
+            "CRC8 (Maxim/Dallas)",
+            "CRC16 (Modbus)",
+            "CRC16 (CCITT/XMODEM)",
+            "CRC32 (Standard)"
+        ])
+
         # 输入框 (支持回车发送)
         self.send_input = QLineEdit()
         self.send_input.setPlaceholderText("在此输入要发送的指令 (按回车快速发送)...")
@@ -1214,6 +1259,7 @@ class EcuMainWindow(QMainWindow):
         send_layout.addWidget(self.radio_ascii)
         send_layout.addWidget(self.radio_hex)
         send_layout.addWidget(self.cb_send_newline)
+        send_layout.addWidget(self.combo_checksum)  # 💡 加入布局
         send_layout.addWidget(self.send_input)
         send_layout.addWidget(self.btn_send)
 
@@ -1230,12 +1276,82 @@ class EcuMainWindow(QMainWindow):
         # 🌟 核心：当你疯狂滚动鼠标时，瞬间擦除并重新渲染可见区域的高亮！
         self.raw_log_console.verticalScrollBar().valueChanged.connect(self.update_viewport_search_highlights)
 
+        # 先把终端装进左侧分割器
+        self.left_panel.addWidget(term_container)
+
+        # ==========================================
+        # 🌟 插入点 2：组装底层波形图面板
+        # ==========================================
+        self.waveform_panel = QWidget()
+        wave_layout = QVBoxLayout(self.waveform_panel)
+        wave_layout.setContentsMargins(0, 0, 0, 0)
+
+        wave_toolbar = QHBoxLayout()
+        wave_toolbar.addWidget(QLabel("📈 波形追踪变量:"))
+        self.combo_wave_var = QComboBox()
+        self.combo_wave_var.setMinimumWidth(150)
+        self.combo_wave_var.addItem("关闭绘制")
+        self.combo_wave_var.currentTextChanged.connect(self.clear_waveform)
+        wave_toolbar.addWidget(self.combo_wave_var)
+
+        self.btn_clear_wave = QPushButton("🗑️ 清空波形")
+        self.btn_clear_wave.clicked.connect(self.clear_waveform)
+        wave_toolbar.addWidget(self.btn_clear_wave)
+        # ==========================================
+        # 🌟 插入点：新增“重置雷达”按钮
+        # ==========================================
+        self.btn_reset_vars = QPushButton("🧹 重置变量雷达")
+        self.btn_reset_vars.setToolTip("清空下拉框中的历史变量选项，重新嗅探")
+        self.btn_reset_vars.clicked.connect(self.reset_wave_vars)
+        wave_toolbar.addWidget(self.btn_reset_vars)
+        wave_toolbar.addStretch()
+
+        self.btn_close_wave = QPushButton("❌ 关闭图表")
+        self.btn_close_wave.clicked.connect(
+            lambda: self.btn_toggle_wave_main.setChecked(False) or self.toggle_waveform_panel())
+        wave_toolbar.addWidget(self.btn_close_wave)
+
+        wave_layout.addLayout(wave_toolbar)
+
+        if pg:
+            self.plot_widget = pg.PlotWidget()
+            self.plot_widget.setBackground('#2B2B2B' if self.is_dark_mode else '#FDF6E3')
+            self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+            # 配置绿色加粗的抗锯齿曲线 (轨迹线)
+            self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='#10B981', width=2))
+
+            # ==========================================
+            # 🌟 新增：最新的坐标“靶心” (红色圆点 + 边框)
+            # ==========================================
+            self.latest_scatter = pg.ScatterPlotItem(
+                size=14,
+                pen=pg.mkPen(color='#FFFFFF', width=1.5),
+                brush=pg.mkBrush(239, 68, 68, 200)  # 半透明红色
+            )
+            self.plot_widget.addItem(self.latest_scatter)
+
+            wave_layout.addWidget(self.plot_widget)
+        else:
+            err_lbl = QLabel("⚠️ 请在终端执行 pip install pyqtgraph 后重启软件，以启用极速波形图功能。")
+            err_lbl.setStyleSheet("color: #EF4444; font-weight: bold; padding: 20px;")
+            wave_layout.addWidget(err_lbl)
+
+        self.left_panel.addWidget(self.waveform_panel)
+        self.waveform_panel.hide()  # 默认隐藏波形图
+        self.left_panel.setSizes([800, 0])  # 默认把底部压扁
+
+        # 最后把组装好的左侧模块推入主界面
         self.main_splitter.addWidget(self.left_panel)
 
         # ==========================================
-        # 🌟 2. 右侧解析详情面板提升为 self 属性
+        # 🌟 2. 右侧面板升级为多标签页 (QTabWidget)
         # ==========================================
-        # 统一命名为 self.right_panel，用来被顶部按钮控制显隐
+        from PyQt6.QtWidgets import QTabWidget
+        self.right_tabs = QTabWidget()
+
+        # ------------------------------------------
+        # 🗂️ Tab 1: 原有的解析流水线
+        # ------------------------------------------
         self.right_panel = QSplitter(Qt.Orientation.Vertical)
 
         right_top_widget = QWidget()
@@ -1257,13 +1373,10 @@ class EcuMainWindow(QMainWindow):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.horizontalHeader().setStretchLastSection(True)
-
-        # 🌟 增加这一行：开启表格隔行变色（斑马线效果）
         self.table_view.setAlternatingRowColors(True)
         self.table_view.clicked.connect(self.on_row_clicked)
         right_top_layout.addWidget(self.table_view)
 
-        # 将表格区域加到右侧面板中
         self.right_panel.addWidget(right_top_widget)
 
         self.tree_view = QTreeView()
@@ -1271,16 +1384,53 @@ class EcuMainWindow(QMainWindow):
         self.tree_model.setHorizontalHeaderLabels(["字段结构解析详情"])
         self.tree_view.setModel(self.tree_model)
 
-        # 将树状图区域加到右侧面板中
         self.right_panel.addWidget(self.tree_view)
-
-        # 设置右侧面板内部（表格和树状图）的上下比例
         self.right_panel.setSizes([500, 300])
 
-        # 🌟 3. 将组装好的右侧面板，加入到主分割器中
-        self.main_splitter.addWidget(self.right_panel)
-        # 设置左侧终端和右侧面板的左右初始比例
+        self.right_tabs.addTab(self.right_panel, "📊 解析流水线")
+
+        # ------------------------------------------
+        # 🗂️ Tab 2: 🚀 快捷指令面板
+        # ------------------------------------------
+        self.quick_cmd_panel = QWidget()
+        quick_cmd_layout = QVBoxLayout(self.quick_cmd_panel)
+
+        self.cmd_table = QTableWidget(0, 4)
+        self.cmd_table.setHorizontalHeaderLabels(["指令名称 (备注)", "报文内容 (HEX/ASCII)", "格式", "操作"])
+        self.cmd_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.cmd_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.cmd_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.cmd_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.cmd_table.setColumnWidth(2, 80)
+        self.cmd_table.setColumnWidth(3, 80)
+        self.cmd_table.setAlternatingRowColors(True)
+
+        quick_cmd_btn_layout = QHBoxLayout()
+        btn_add_cmd = QPushButton("➕ 新增指令")
+        btn_add_cmd.clicked.connect(lambda: self.add_quick_cmd_row("", "", "HEX"))
+        btn_del_cmd = QPushButton("🗑️ 删除选中")
+        btn_del_cmd.setStyleSheet("color: #EF4444;")
+        btn_del_cmd.clicked.connect(self.delete_quick_cmd_row)
+        btn_save_cmd = QPushButton("💾 保存配置到本地")
+        btn_save_cmd.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold;")
+        btn_save_cmd.clicked.connect(self.save_quick_cmds)
+
+        quick_cmd_btn_layout.addWidget(btn_add_cmd)
+        quick_cmd_btn_layout.addWidget(btn_del_cmd)
+        quick_cmd_btn_layout.addStretch()
+        quick_cmd_btn_layout.addWidget(btn_save_cmd)
+
+        quick_cmd_layout.addWidget(self.cmd_table)
+        quick_cmd_layout.addLayout(quick_cmd_btn_layout)
+
+        self.right_tabs.addTab(self.quick_cmd_panel, "🚀 快捷指令")
+
+        # 🌟 3. 将组装好的右侧多标签页，加入到主分割器中
+        self.main_splitter.addWidget(self.right_tabs)
         self.main_splitter.setSizes([500, 800])
+
+        # 🌟 自动加载本地保存的指令
+        self.load_quick_cmds()
 
         # 🌟 4. 将主分割器加入到窗口主布局中
         main_layout.addWidget(self.main_splitter)
@@ -1317,7 +1467,7 @@ class EcuMainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "必须至少保留一个工作区！")
             return
 
-        self.right_panel.setVisible(is_visible)
+        self.right_tabs.setVisible(is_visible)
 
     # ==========================================
     # 🌟 发送面板控制逻辑
@@ -1329,6 +1479,78 @@ class EcuMainWindow(QMainWindow):
         # 体验优化：如果展开了发送面板，自动把光标聚焦到输入框，方便直接打字
         if is_visible:
             self.send_input.setFocus()
+
+    # ==========================================
+    # 🌟 新增：动态校验和算法引擎
+    # ==========================================
+    def calculate_checksum(self, data_bytes, calc_type):
+        """支持多种主流工控/汽车/物联网协议的校验和计算"""
+        if not data_bytes:
+            return b''
+
+        import struct
+        import zlib
+
+        if calc_type == "CheckSum-8 (ADD)":
+            # 8位累加和：所有字节相加，取低 8 位 (1个字节)
+            return bytes([sum(data_bytes) & 0xFF])
+
+        elif calc_type == "CheckSum-8 (XOR / BCC)":
+            # 异或校验 (BCC)：所有字节连续异或 (1个字节)
+            bcc = 0
+            for b in data_bytes:
+                bcc ^= b
+            return bytes([bcc])
+
+        elif calc_type == "CheckSum-16 (ADD)":
+            # 16位累加和：所有字节相加，保留低 16 位 (小端模式传输)
+            return struct.pack('<H', sum(data_bytes) & 0xFFFF)
+
+        elif calc_type == "CRC8 (Standard)":
+            # 标准 CRC8 (多项式 0x07，初始值 0x00)
+            crc = 0x00
+            for b in data_bytes:
+                crc ^= b
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x07) if (crc & 0x80) else (crc << 1)
+                    crc &= 0xFF
+            return bytes([crc])
+
+        elif calc_type == "CRC8 (Maxim/Dallas)":
+            # DS18B20 等传感器常用 CRC8 (多项式 0x31，翻转 0x8C)
+            crc = 0x00
+            for b in data_bytes:
+                crc ^= b
+                for _ in range(8):
+                    crc = ((crc >> 1) ^ 0x8C) if (crc & 0x01) else (crc >> 1)
+                    crc &= 0xFF
+            return bytes([crc])
+
+        elif calc_type == "CRC16 (Modbus)":
+            # 标准 Modbus CRC16 (多项式 0xA001，小端模式)
+            crc = 0xFFFF
+            for b in data_bytes:
+                crc ^= b
+                for _ in range(8):
+                    crc = ((crc >> 1) ^ 0xA001) if (crc & 0x01) else (crc >> 1)
+                    crc &= 0xFFFF
+            return struct.pack('<H', crc)
+
+        elif calc_type == "CRC16 (CCITT/XMODEM)":
+            # XMODEM/CCITT 协议 (多项式 0x1021，大端模式)
+            crc = 0x0000
+            for b in data_bytes:
+                crc ^= (b << 8)
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
+                    crc &= 0xFFFF
+            return struct.pack('>H', crc)
+
+        elif calc_type == "CRC32 (Standard)":
+            # 以太网/OTA 常用 CRC32 (IEEE 802.3 标准，小端模式)
+            return struct.pack('<I', zlib.crc32(data_bytes) & 0xFFFFFFFF)
+
+        return b''
 
     def execute_send_data(self):
         text = self.send_input.text()
@@ -1349,45 +1571,41 @@ class EcuMainWindow(QMainWindow):
 
         try:
             # ==========================================
-            # 🌟 模式一：处理 HEX 发送
+            # 1. 获取纯净的基础 Payload (去除换行符的原始数据)
             # ==========================================
             if is_hex:
                 import re
-                # 剔除所有的空格和无关键盘符号，只留 16 进制字符
                 clean_hex = re.sub(r'[^0-9a-fA-F]', '', text)
                 if len(clean_hex) % 2 != 0:
                     QMessageBox.warning(self, "格式错误",
                                         "HEX 模式下，输入的 16 进制字符数量必须是偶数！\n(例如: 0A 0B 0C)")
                     return
-
-                data_to_send = bytes.fromhex(clean_hex)
-
-                # 如果勾选了发送新行，追加 0D 0A
-                if add_newline:
-                    data_to_send += b'\r\n'
-
-                # 构造漂亮的回显字符串：每个字节用空格隔开并大写
-                echo_text = " ".join(f"{b:02X}" for b in data_to_send)
-
-            # ==========================================
-            # 🌟 模式二：处理 ASCII 发送
-            # ==========================================
+                base_data = bytes.fromhex(clean_hex)
             else:
-                str_to_send = text
-                if add_newline:
-                    str_to_send += '\r\n'
-
-                # 统一编码为 utf-8 发送
-                data_to_send = str_to_send.encode('utf-8', errors='replace')
-                # ASCII 模式下如果加了回车换行，回显时带个标记以便区分
-                echo_text = text if not add_newline else text + " \\r\\n"
+                base_data = text.encode('utf-8', errors='replace')
 
             # ==========================================
-            # 🌟 最终执行发送
+            # 🌟 2. 核心拦截：智能计算并追加校验和
+            # ==========================================
+            chk_type = self.combo_checksum.currentText()
+            if chk_type != "无校验":
+                chk_bytes = self.calculate_checksum(base_data, chk_type)
+                base_data += chk_bytes  # 静默拼接到末尾
+
+            # ==========================================
+            # 3. 换行符垫底追加 (必须在校验和之后)
+            # ==========================================
+            data_to_send = base_data
+            if add_newline:
+                data_to_send += b'\r\n'
+
+            # ==========================================
+            # 4. 最终执行底层发送
             # ==========================================
             success, err_msg = self.serial_worker.send_data(data_to_send)
 
             if success:
+                # 后续的存入时光机、UI回显过滤逻辑 (完全保持不变)
                 now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
                 self.terminal_history.append({'type': 'TX', 'time': now_str, 'data': data_to_send})
 
@@ -1396,16 +1614,15 @@ class EcuMainWindow(QMainWindow):
                 else:
                     display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
 
-                # 同理增加过滤拦截
+                # 过滤拦截逻辑
                 filter_kw = self.search_input.text().lower()
                 allow_render = True
-                # 判断界面上的过滤复选框是否被勾选
                 is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
 
                 if is_filtering:
                     filter_kw = self.search_input.text().lower()
                     if filter_kw and filter_kw not in display_text.lower():
-                        allow_render = False  # 不包含关键词，拒绝上屏！
+                        allow_render = False
 
                 self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
                 self.send_input.selectAll()
@@ -1789,6 +2006,22 @@ class EcuMainWindow(QMainWindow):
             display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
         else:
             display_text = raw_bytes.decode('utf-8', errors='replace')
+
+            # ==========================================
+            # 🌟 升级版：对纯 ASCII 文本进行正则变量提取 (支持嗅探 2D 坐标对)
+            # ==========================================
+            text_vars = self._sniff_raw_text_vars(display_text)
+
+            # 检查是否有我们要画的波形或轨迹变量
+            target_var = self.combo_wave_var.currentText()
+            if target_var and target_var != "关闭绘制" and getattr(self, 'waveform_panel',
+                                                                   None) and self.waveform_panel.isVisible():
+                if target_var in text_vars:
+                    # ==========================================
+                    # 🚀 核心修改：抛弃手动 append，直接丢给统一渲染引擎
+                    # 引擎会自动判断这是 1D 数字，还是 2D 坐标组 (X, Y)，并画出靶心！
+                    # ==========================================
+                    self.update_plot_data(text_vars[target_var])
         # ==========================================
         # 🌟 核心拦截：实时比对过滤关键词
         # ==========================================
@@ -1848,6 +2081,21 @@ class EcuMainWindow(QMainWindow):
                     msg_def = self.decoder.msgs.get(frame['type'], {})
                     frame['name'] = msg_def.get('name', '未知消息')
                     if frame.get('seq') is None or frame.get('seq') == "N/A": frame['seq'] = "实时"
+
+                    # ==========================================
+                    # 🌟 1. 动态嗅探报文中的所有“数值型变量”供下拉框选择
+                    # ==========================================
+                    self._extract_numerical_vars(frame.get('data', {}))
+
+                    # ==========================================
+                    # 🌟 2. 如果开启了波形图且选中了变量，则抽取数据打点！
+                    # ==========================================
+                    target_var = self.combo_wave_var.currentText()
+                    if target_var and target_var != "关闭绘制" and self.waveform_panel.isVisible():
+                        val = self._extract_value_from_frame(frame, target_var)
+                        if val is not None:
+                            self.update_plot_data(val)  # 🌟 统一调用接口
+
                 self.all_frames.extend(parsed_frames)
                 target_type = self.combo_filter.currentData()
                 if target_type == "ALL" or not target_type:
@@ -2109,6 +2357,331 @@ class EcuMainWindow(QMainWindow):
         QHeaderView::section { background-color: #2b2d30; color: #a9b7c6; border: none; border-right: 1px solid #43454a; border-bottom: 1px solid #43454a; padding: 4px; font-weight: bold; }
         """
 
+    # ==========================================
+    # 🌟 快捷指令面板核心逻辑
+    # ==========================================
+    def add_quick_cmd_row(self, name="", data="", fmt="HEX"):
+        row = self.cmd_table.rowCount()
+        self.cmd_table.insertRow(row)
+
+        item_name = QTableWidgetItem(name)
+        item_data = QTableWidgetItem(data)
+        self.cmd_table.setItem(row, 0, item_name)
+        self.cmd_table.setItem(row, 1, item_data)
+
+        combo_fmt = QComboBox()
+        combo_fmt.addItems(["HEX", "ASCII"])
+        combo_fmt.setCurrentText(fmt)
+        self.cmd_table.setCellWidget(row, 2, combo_fmt)
+
+        btn_send = QPushButton("发送 🚀")
+        btn_send.setStyleSheet("background-color: #10B981; color: white; font-weight: bold;")
+        # Qt 经典解法：获取发出信号的按钮在表格中的位置，防止复用异常
+        btn_send.clicked.connect(lambda _, b=btn_send: self.send_quick_cmd(b))
+        self.cmd_table.setCellWidget(row, 3, btn_send)
+
+    def delete_quick_cmd_row(self):
+        current_row = self.cmd_table.currentRow()
+        if current_row >= 0:
+            self.cmd_table.removeRow(current_row)
+        else:
+            QMessageBox.information(self, "提示", "请先点击选中要删除的指令行")
+
+    def save_quick_cmds(self):
+        cmds = []
+        for i in range(self.cmd_table.rowCount()):
+            name_item = self.cmd_table.item(i, 0)
+            data_item = self.cmd_table.item(i, 1)
+            fmt_widget = self.cmd_table.cellWidget(i, 2)
+
+            name = name_item.text().strip() if name_item else ""
+            data = data_item.text().strip() if data_item else ""
+            fmt = fmt_widget.currentText() if fmt_widget else "HEX"
+
+            if name or data:
+                cmds.append({"name": name, "data": data, "format": fmt})
+
+        try:
+            with open("quick_cmds.json", "w", encoding="utf-8") as f:
+                json.dump(cmds, f, ensure_ascii=False, indent=4)
+            self.statusBar().showMessage("✅ 快捷指令已保存至本地", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"保存快捷指令时出错:\n{e}")
+
+    def load_quick_cmds(self):
+        self.cmd_table.setRowCount(0)
+        if os.path.exists("quick_cmds.json"):
+            try:
+                with open("quick_cmds.json", "r", encoding="utf-8") as f:
+                    cmds = json.load(f)
+                    for cmd in cmds:
+                        self.add_quick_cmd_row(cmd.get("name", ""), cmd.get("data", ""), cmd.get("format", "HEX"))
+            except:
+                pass
+
+        # 如果是空的，给个默认模板行
+        if self.cmd_table.rowCount() == 0:
+            self.add_quick_cmd_row("示例: 获取设备版本", "AA 55 01", "HEX")
+
+    def send_quick_cmd(self, btn):
+        # 1. 找到是哪一行的按钮被点击了
+        index = self.cmd_table.indexAt(btn.pos())
+        if not index.isValid(): return
+        row = index.row()
+
+        # 2. 获取报文数据和格式
+        data_item = self.cmd_table.item(row, 1)
+        fmt_widget = self.cmd_table.cellWidget(row, 2)
+
+        if not data_item or not data_item.text().strip():
+            QMessageBox.warning(self, "提示", "发送数据不能为空！")
+            return
+
+        data_str = data_item.text().strip()
+        fmt = fmt_widget.currentText() if fmt_widget else "HEX"
+
+        # 3. 极其优雅的“借刀杀人”：修改主发送区数据，并模拟点击主发送按钮
+        # 这样它就会完美经过校验和计算、新行追加、日志历史记录等所有核心链路！
+        self.send_input.setText(data_str)
+        if fmt == "HEX":
+            self.radio_hex.setChecked(True)
+        else:
+            self.radio_ascii.setChecked(True)
+
+        self.btn_send.click()
+
+    # ==========================================
+    # 🌟 实时波形图核心支持逻辑
+    # ==========================================
+    def toggle_waveform_panel(self):
+        is_visible = self.btn_toggle_wave_main.isChecked()
+        self.waveform_panel.setVisible(is_visible)
+        if is_visible:
+            # 智能展开：给波形图分配 30% 的屏幕高度
+            sizes = self.left_panel.sizes()
+            if sizes[1] < 50:
+                self.left_panel.setSizes([int(sum(sizes)*0.7), int(sum(sizes)*0.3)])
+
+    def clear_waveform(self, *args):
+        self.wave_data_x.clear()
+        self.wave_data_y.clear()
+
+        if not pg or not hasattr(self, 'plot_curve'): return
+
+        self.plot_curve.setData([], [])
+        if hasattr(self, 'latest_scatter') and self.latest_scatter:
+            self.latest_scatter.setData([], [])
+
+        # ==========================================
+        # 🌟 智能图表变形：如果是轨迹，锁定比例尺！
+        # ==========================================
+        target_var = self.combo_wave_var.currentText()
+        is_gps = target_var.startswith("📍")
+
+        # 极客细节：锁定长宽比，防止轨迹图变成“扁地图”或“长条地图”
+        self.plot_widget.setAspectLocked(is_gps)
+
+        if is_gps:
+            self.plot_widget.setLabel('bottom', "Longitude (经度 X)")
+            self.plot_widget.setLabel('left', "Latitude (纬度 Y)")
+        else:
+            self.plot_widget.setLabel('bottom', "Samples (采样点)")
+            self.plot_widget.setLabel('left', "Value (数值)")
+
+    def _extract_numerical_vars(self, data_dict, prefix=""):
+        """像雷达一样扫描 JSON，模糊提取带有 lat/lng 字样的变量"""
+        lat_key, lng_key = None, None
+
+        for k, v in data_dict.items():
+            if isinstance(v, (int, float)):
+                var_name = f"{prefix}{k}"
+                if var_name not in self.known_wave_vars:
+                    self.known_wave_vars.add(var_name)
+                    self.combo_wave_var.addItem(var_name)
+
+                # 🌟 升级 1：模糊匹配 (只要名字里包含 lat/lng/lon 就抓取)
+                kl = k.lower()
+                if 'lat' in kl: lat_key = var_name
+                if 'lng' in kl or 'lon' in kl: lng_key = var_name
+
+            elif isinstance(v, dict):
+                self._extract_numerical_vars(v, prefix=f"{prefix}{k}.")
+
+        # 只要这一层字典里凑齐了这对卧龙凤雏，直接合成轨迹选项！
+        if lat_key and lng_key:
+            var_name = f"📍 轨迹 ({lat_key},{lng_key})"
+            if var_name not in self.known_wave_vars:
+                self.known_wave_vars.add(var_name)
+                self.combo_wave_var.addItem(var_name)
+
+    def _extract_value_from_frame(self, frame, target_var):
+        """精准提取变量的当前数值"""
+        parts = target_var.split('.')
+        d = frame.get('data', {})
+        for p in parts:
+            if isinstance(d, dict) and p in d:
+                d = d[p]
+            else:
+                return None
+        if isinstance(d, (int, float)):
+            return d
+        return None
+
+    def _sniff_raw_text_vars(self, text):
+        """正则文本雷达：兼容 key=val，并新增工业级 NMEA 标准坐标硬解码"""
+        import re
+        extracted_data = {}
+
+        # 确保坐标记忆存在
+        if not hasattr(self, '_ascii_cache_lat'): self._ascii_cache_lat = None
+        if not hasattr(self, '_ascii_cache_lng'): self._ascii_cache_lng = None
+
+        # ==========================================
+        # 🌟 升级 2：NMEA 报文霸王硬上弓解码
+        # 匹配格式：3445.1234,N,11345.1234,E (度分格式)
+        # ==========================================
+        nmea_match = re.search(r'(\d{2,4}\.\d+),([NS]),(\d{3,5}\.\d+),([EW])', text)
+        if nmea_match:
+            try:
+                lat_raw, lat_dir, lng_raw, lng_dir = nmea_match.groups()
+
+                # NMEA 纬度是 DDMM.MMMM (前2位度，后边分)
+                lat_deg = float(lat_raw[:2])
+                lat_min = float(lat_raw[2:])
+                lat_val = lat_deg + lat_min / 60.0
+                if lat_dir == 'S': lat_val = -lat_val
+
+                # NMEA 经度是 DDDMM.MMMM (找小数点前推2位作为度)
+                dot_idx = lng_raw.find('.')
+                lng_deg = float(lng_raw[:dot_idx-2])
+                lng_min = float(lng_raw[dot_idx-2:])
+                lng_val = lng_deg + lng_min / 60.0
+                if lng_dir == 'W': lng_val = -lng_val
+
+                self._ascii_cache_lat = lat_val
+                self._ascii_cache_lng = lng_val
+            except Exception as e:
+                pass
+
+        # ==========================================
+        # 原有逻辑：兼容普通的 key=val 格式
+        # ==========================================
+        pattern = re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*([-+]?\d*\.?\d+)')
+        matches = pattern.findall(text)
+
+        for key, val_str in matches:
+            try:
+                val = float(val_str)
+                extracted_data[key] = val
+
+                if key not in self.known_wave_vars:
+                    self.known_wave_vars.add(key)
+                    self.combo_wave_var.addItem(key)
+
+                kl = key.lower()
+                if 'lat' in kl: self._ascii_cache_lat = val
+                if 'lng' in kl or 'lon' in kl: self._ascii_cache_lng = val
+            except ValueError:
+                pass
+
+        # 🌟 合成最终的 ASCII 轨迹输出
+        if self._ascii_cache_lat is not None and self._ascii_cache_lng is not None:
+            var_name = "📍 轨迹 (ASCII匹配)"
+            # 注意顺序：图表里 X轴是经度(lng)，Y轴是纬度(lat)
+            extracted_data[var_name] = (self._ascii_cache_lng, self._ascii_cache_lat)
+            if var_name not in self.known_wave_vars:
+                self.known_wave_vars.add(var_name)
+                self.combo_wave_var.addItem(var_name)
+
+        return extracted_data
+
+    def _extract_value_from_frame(self, frame, target_var):
+        """精准提取变量当前数值 (支持坐标对解包)"""
+        if target_var.startswith("📍 轨迹"):
+            import re
+            m = re.search(r'\((.*?),(.*?)\)', target_var)
+            if m:
+                lat_path, lng_path = m.groups()
+
+                # 辅助方法：按路径找字典
+                def get_val(path, data):
+                    for p in path.split('.'):
+                        if isinstance(data, dict) and p in data:
+                            data = data[p]
+                        else:
+                            return None
+                    return data if isinstance(data, (int, float)) else None
+
+                lat_v = get_val(lat_path, frame.get('data', {}))
+                lng_v = get_val(lng_path, frame.get('data', {}))
+                if lat_v is not None and lng_v is not None:
+                    return (lng_v, lat_v)  # 返回元组 (X, Y)
+            return None
+
+        # 1D 普通变量
+        parts = target_var.split('.')
+        d = frame.get('data', {})
+        for p in parts:
+            if isinstance(d, dict) and p in d:
+                d = d[p]
+            else:
+                return None
+        return d if isinstance(d, (int, float)) else None
+
+    def update_plot_data(self, val):
+        """统一渲染引擎：自动识别 1D 还是 2D 并绘制"""
+        if not pg or not hasattr(self, 'plot_curve'): return
+
+        # 👇 添加这行打印，如果在控制台看到这个打印，说明数据成功传到了绘图引擎！
+        # print(f"【绘图引擎】收到数据: {val}")
+
+        try:
+            if isinstance(val, tuple):
+                # ==========================================
+                # 📍 2D 坐标绘制：既画轨迹线，又画靶心
+                # ==========================================
+                self.wave_data_x.append(val[0])
+                self.wave_data_y.append(val[1])
+
+                # 显式使用关键字传参，防止不同版本的 pyqtgraph 罢工
+                self.plot_curve.setData(x=list(self.wave_data_x), y=list(self.wave_data_y))
+
+                if hasattr(self, 'latest_scatter') and self.latest_scatter:
+                    self.latest_scatter.setData(x=[val[0]], y=[val[1]])
+            else:
+                # ==========================================
+                # 📈 1D 波形绘制：隐藏靶心，只画 Y 值
+                # ==========================================
+                self.wave_data_y.append(val)
+                self.plot_curve.setData(list(self.wave_data_y))
+
+                if hasattr(self, 'latest_scatter') and self.latest_scatter:
+                    self.latest_scatter.setData(x=[], y=[])
+
+        except Exception as e:
+            print(f"🚨 绘图渲染失败: {e}")
+
+    # ==========================================
+    # 🌟 重置嗅探雷达
+    # ==========================================
+    def reset_wave_vars(self):
+        """彻底清空变量嗅探雷达的记忆和下拉框"""
+        # 1. 暂时屏蔽信号，防止在清空下拉框时触发各种报错
+        self.combo_wave_var.blockSignals(True)
+        self.combo_wave_var.clear()
+        self.combo_wave_var.addItem("关闭绘制")
+        self.combo_wave_var.blockSignals(False)
+
+        # 2. 彻底抹除底层的嗅探记忆
+        self.known_wave_vars.clear()
+        if hasattr(self, '_ascii_cache_lat'): self._ascii_cache_lat = None
+        if hasattr(self, '_ascii_cache_lng'): self._ascii_cache_lng = None
+
+        # 3. 顺便把画板上的残留线条也抹掉
+        self.clear_waveform()
+
+        # 体验优化：在底部状态栏给个提示
+        self.statusBar().showMessage("✅ 变量雷达已重置，等待接收新变量...", 3000)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
