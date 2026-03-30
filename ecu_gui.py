@@ -6,6 +6,8 @@ import re
 import binascii
 import csv
 import time
+import math
+import socket
 
 from datetime import datetime, timezone, timedelta
 
@@ -30,9 +32,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QFileDialog, QTableView, QTreeView, QComboBox,
                              QLabel, QProgressBar, QSplitter, QMessageBox, QHeaderView, QAbstractItemView, QLineEdit,
                              QCheckBox, QTextEdit, QDialog, QTableWidget, QTableWidgetItem, QSizePolicy, QPlainTextEdit,
-                             QRadioButton)
+                             QRadioButton, QSpinBox)
 from PyQt6.QtGui import (QStandardItemModel, QStandardItem, QFont, QTextCursor,
-                         QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter, QIcon)
+                         QSyntaxHighlighter, QTextCharFormat, QColor, QTextBlockFormat, QPainter, QIcon, QAction)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QAbstractTableModel, QEvent, QRegularExpression, QTimer
 
 
@@ -267,49 +269,59 @@ class TerminalTextEdit(QTextEdit):
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.setFont(font)
         self.setReadOnly(True)
-        self.document().setMaximumBlockCount(50000)
-        self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
+
         # ==========================================
         # 🚀 QTextEdit 性能极限优化三板斧
         # ==========================================
-        # 1. 内存截断：限制 5 万行（对于 QTextEdit 足够安全）
-        self.document().setMaximumBlockCount(50000)
-        # 2. 极其关键：关闭历史撤销栈！(能节省海量内存和对象创建开销)
+        # 1. 极其关键：关闭历史撤销栈！(节省海量内存)
         self.setUndoRedoEnabled(False)
-        # 🌟 恢复自动换行：根据当前界面的宽度自动软折行
-        # 软折行在视觉上会换行，但物理上依然是“同一行”，所以完美契合“只在开头加时间戳”的需求！
+
+        # 2. 性能护城河：将 50000 行缩减为 2000 行！
+        # 这是解决 NMEA 海量数据下拖拽窗口卡顿的根本方法
+        self.document().setMaximumBlockCount(2000)
+
+        # 3. 初始保留自动换行 (后续由我们在工具栏加的 CheckBox 动态控制)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
+        # 🌟 启动高亮引擎 (只保留这一次即可)
         self.highlighter = LogHighlighter(self.document(), is_dark_mode=True)
 
         # ==========================================
         # 🌟 完美找回行间距 (QTextEdit 支持度 100%)
         # ==========================================
         block_fmt = QTextBlockFormat()
-        # 130 代表 130% 的行高，1 代表枚举值 ProportionalHeight
-        block_fmt.setLineHeight(130, 1)
+        block_fmt.setLineHeight(130, 1)  # 130% 行高
         block_fmt.setBottomMargin(2)
 
-        # 将这个格式应用到全局光标，后续追加的所有日志都会自动继承这个间距！
         cursor = self.textCursor()
         cursor.setBlockFormat(block_fmt)
         self.setTextCursor(cursor)
+
         # ==========================================
-        # 🌟 致敬 PyCharm 2022.3 Darcula 经典配
+        # 🌟 致敬 PyCharm 2022.3 Darcula 经典配色
         # ==========================================
         self.setStyleSheet("""
             QTextEdit {
-                background-color: #2B2B2B; /* PyCharm 经典深灰背景 */
-                color: #A9B7C6;            /* PyCharm 柔和文字灰白 */
-                border: none;              /* 去除多余边框更清爽 */
+                background-color: #2B2B2B;
+                color: #A9B7C6;
+                border: none;
             }
         """)
 
     def wheelEvent(self, event):
-        if event.angleDelta().y() > 0:
-            if self.main_window.cb_auto_scroll.isChecked():
-                self.main_window.cb_auto_scroll.setChecked(False)
-        super().wheelEvent(event)
+        # 🌟 核心逻辑：如果是查找跳转引起的滚动，直接放行，不要走“手动滚轮逻辑”
+        if getattr(self, '_is_searching', False):
+            super().wheelEvent(event)
+            return
+        # 🌟 核心修复：将 cb_auto_scroll 替换为右键菜单中的 action_autoscroll
+        # 注意：QAction 获取状态用 isChecked()，这和按钮是一样的
+        # 只有在不是查找、且开启了自动滚动时，用户向上滚轮才触发关闭
+        if hasattr(self.main_window, 'action_autoscroll') and self.main_window.action_autoscroll.isChecked():
+            if event.angleDelta().y() > 0:  # 向上滚
+                self.main_window.action_autoscroll.setChecked(False)
+                self.main_window.statusBar().showMessage("⏬ 自动滚动已暂停 (手动滑屏)", 2000)
+
+            super().wheelEvent(event)
 
 
 class AutoScrollTableView(QTableView):
@@ -404,6 +416,107 @@ class SerialWorker(QThread):
                 return False, str(e)
         return False, "串口未打开或已断开"
 
+# ==========================================
+# 🌟 新增：TCP/UDP 海陆空网络通信守护线程
+# ==========================================
+class NetworkWorker(QThread):
+    data_received = pyqtSignal(bytes)
+    error_occurred = pyqtSignal(str)
+    finished_signal = pyqtSignal()
+    client_connected = pyqtSignal(str) # 专门留给 TCP Server 的上线通知
+
+    def __init__(self, mode, ip, port):
+        super().__init__()
+        self.mode = mode
+        self.ip = ip
+        self.port = port
+        self.running = True
+        self.sock = None
+        self.client_sock = None # 用于存储 TCP Server 收到的客户端，或 UDP 最近的源地址
+
+    def run(self):
+        try:
+            if self.mode == "TCP Client":
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.settimeout(3.0)
+                self.sock.connect((self.ip, self.port))
+                self.sock.settimeout(0.1) # 连接成功后把超时改小，防止卡死 UI
+                while self.running:
+                    try:
+                        data = self.sock.recv(4096)
+                        if data: self.data_received.emit(data)
+                        else: raise ConnectionError("服务器主动断开连接")
+                    except socket.timeout: continue
+                    except BlockingIOError: continue
+
+            elif self.mode == "TCP Server":
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.sock.bind((self.ip, self.port))
+                self.sock.listen(1)
+                self.sock.settimeout(0.5)
+                while self.running:
+                    try:
+                        client, addr = self.sock.accept()
+                        self.client_sock = client
+                        self.client_sock.settimeout(0.1)
+                        self.client_connected.emit(f"{addr[0]}:{addr[1]}")
+                        while self.running and self.client_sock:
+                            try:
+                                data = self.client_sock.recv(4096)
+                                if data: self.data_received.emit(data)
+                                else:
+                                    self.client_sock.close()
+                                    self.client_sock = None
+                                    self.error_occurred.emit("客户端已断开，重新监听中...")
+                                    break
+                            except socket.timeout: continue
+                    except socket.timeout: continue
+
+            elif self.mode == "UDP":
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.sock.bind((self.ip, self.port))
+                self.sock.settimeout(0.1)
+                while self.running:
+                    try:
+                        data, addr = self.sock.recvfrom(4096)
+                        self.client_sock = addr # 暂存对方的 IP 和端口，以便一会回复数据
+                        if data: self.data_received.emit(data)
+                    except socket.timeout: continue
+
+        except Exception as e:
+            if self.running: self.error_occurred.emit(f"网络异常: {str(e)}")
+        finally:
+            self.stop()
+            self.finished_signal.emit()
+
+    def stop(self):
+        self.running = False
+        if getattr(self, 'client_sock', None) and isinstance(self.client_sock, socket.socket):
+            try: self.client_sock.close()
+            except: pass
+        if getattr(self, 'sock', None):
+            try: self.sock.close()
+            except: pass
+
+    def send_data(self, data_bytes):
+        try:
+            if self.mode == "TCP Client" and self.sock:
+                self.sock.sendall(data_bytes)
+                return True, ""
+            elif self.mode == "TCP Server":
+                if self.client_sock:
+                    self.client_sock.sendall(data_bytes)
+                    return True, ""
+                return False, "当前无客户端连接，无法发送"
+            elif self.mode == "UDP":
+                if self.sock and getattr(self, 'client_sock', None):
+                    self.sock.sendto(data_bytes, self.client_sock)
+                    return True, ""
+                return False, "尚未收到任何 UDP 目标地址，无法回复数据"
+            return False, "网络未连接"
+        except Exception as e:
+            return False, str(e)
 
 # ==========================================
 # 核心业务层 (Model): 解析引擎 (完美保留)
@@ -709,6 +822,115 @@ class StreamParser:
         decoded_data = self.decoder.decode_body(msg_type_hex, body)
         return {"type": msg_type_hex, "seq": seq, "data": decoded_data}
 
+
+# ==========================================
+# 🌟 新增：离线日志回放 (时光倒流) 线程
+# ==========================================
+class PlaybackWorker(QThread):
+    data_received = pyqtSignal(bytes)
+    progress_updated = pyqtSignal(int, int)
+    finished_signal = pyqtSignal()
+
+    def __init__(self, filepath, speed):
+        super().__init__()
+        self.filepath = filepath
+        self.speed = speed
+        self.running = True
+        self.is_paused = False
+
+    def run(self):
+        try:
+            # 1. 极速扫描一遍文件，获取总行数，用于进度条显示
+            with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                total = sum(1 for _ in f)
+
+            # 2. 正式逐行读取并模拟串口喷发
+            with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                for i, line in enumerate(f):
+                    # 暂停阻塞逻辑
+                    while self.is_paused and self.running:
+                        self.msleep(50)
+                    if not self.running:
+                        break
+
+                    # 核心：将这一行文本强行转回 bytes，伪装成刚从串口读到的数据！
+                    self.data_received.emit(line.encode('utf-8'))
+
+                    # 降低 UI 刷新频率，防止进度条卡死主线程
+                    if i % max(1, int(total / 100)) == 0 or i == total - 1:
+                        self.progress_updated.emit(i + 1, total)
+
+                    # 3. 极其精准的倍速休眠控制
+                    if self.speed > 0:
+                        self.msleep(int(100 / self.speed))  # 1x = 100ms/行
+                    else:
+                        # 极速 Max 模式：每 100 行稍微让出一下 CPU 喘口气，防止把 UI 线程彻底卡死
+                        if i % 100 == 0: self.msleep(1)
+
+        except Exception as e:
+            print(f"🚨 回放引擎异常: {e}")
+        finally:
+            self.finished_signal.emit()
+
+    def set_speed(self, speed):
+        self.speed = speed
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        return self.is_paused
+
+    def stop(self):
+        self.running = False
+
+
+# ==========================================
+# 🌟 新增：自动化测试宏 (流水线) 线程
+# ==========================================
+class MacroWorker(QThread):
+    send_cmd_signal = pyqtSignal(str, str)  # 信号：报文内容, 格式(HEX/ASCII)
+    row_highlight_signal = pyqtSignal(int)  # 信号：高亮当前执行行
+    finished_signal = pyqtSignal()
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, macro_list, loop_count):
+        super().__init__()
+        self.macro_list = macro_list  # 格式: [{'data': '...', 'fmt': 'HEX', 'delay': 500}, ...]
+        self.loop_count = loop_count
+        self.running = True
+
+    def run(self):
+        try:
+            for loop in range(self.loop_count):
+                if not self.running: break
+                self.log_signal.emit(f"🔄 开始执行第 {loop + 1}/{self.loop_count} 轮测试脚本...")
+
+                for idx, cmd in enumerate(self.macro_list):
+                    if not self.running: break
+
+                    # 1. 高亮 UI 表格行，提示进度
+                    self.row_highlight_signal.emit(idx)
+
+                    # 2. 触发主线程发送动作
+                    self.send_cmd_signal.emit(cmd['data'], cmd['fmt'])
+
+                    # 3. 精准延时 (分段休眠，确保点击"停止"时能瞬间响应，不被长延时卡死)
+                    delay_ms = cmd.get('delay', 500)
+                    steps = delay_ms // 50
+                    rem = delay_ms % 50
+                    for _ in range(steps):
+                        if not self.running: break
+                        self.msleep(50)
+                    if self.running and rem > 0:
+                        self.msleep(rem)
+
+        except Exception as e:
+            print(f"🚨 宏引擎异常: {e}")
+        finally:
+            self.row_highlight_signal.emit(-1)  # 熄灭高亮
+            self.finished_signal.emit()
+
+    def stop(self):
+        self.running = False
 
 class ParseWorker(QThread):
     progress = pyqtSignal(int)
@@ -1023,88 +1245,165 @@ class EcuMainWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(6)
 
-        # 顶部工具栏
+        # ==========================================
+        # 🌟 1. 启用系统原生菜单栏 (降维收纳 7 个大按钮)
+        # ==========================================
+        menubar = self.menuBar()
+
+        # --- 【文件】菜单 ---
+        file_menu = menubar.addMenu("📁 文件(F)")
+
+        action_load = QAction("📂 静态解析离线日志", self)
+        action_load.triggered.connect(self.load_file)
+        file_menu.addAction(action_load)
+
+        action_playback = QAction("⏪ 动态回放历史日志", self)
+        action_playback.triggered.connect(self.start_playback_dialog)
+        file_menu.addAction(action_playback)
+
+        # --- 【视图】菜单 (拯救界面的核心功臣) ---
+        view_menu = menubar.addMenu("👁️ 视图(V)")
+
+        self.action_toggle_left = QAction("🖥️ 串口终端", self, checkable=True)
+        self.action_toggle_left.setChecked(True)
+        self.action_toggle_left.triggered.connect(self.toggle_left_panel)
+        view_menu.addAction(self.action_toggle_left)
+
+        self.action_toggle_right = QAction("📊 解析面板", self, checkable=True)
+        self.action_toggle_right.setChecked(False)
+        self.action_toggle_right.triggered.connect(self.toggle_right_panel)
+        view_menu.addAction(self.action_toggle_right)
+
+        self.action_toggle_send = QAction("📤 发送面板", self, checkable=True)
+        self.action_toggle_send.setChecked(False)
+        self.action_toggle_send.triggered.connect(self.toggle_send_panel)
+        view_menu.addAction(self.action_toggle_send)
+
+        self.action_toggle_wave = QAction("📈 实时波形", self, checkable=True)
+        self.action_toggle_wave.setChecked(False)
+        self.action_toggle_wave.triggered.connect(self.toggle_waveform_panel)
+        view_menu.addAction(self.action_toggle_wave)
+
+        view_menu.addSeparator()  # 分割线
+
+        self.action_theme = QAction("☀️ 切换深/浅色主题", self)
+        self.action_theme.triggered.connect(self.toggle_theme)
+        view_menu.addAction(self.action_theme)
+
+        # ==========================================
+        # 🌟 2. 极其紧凑的极客工具栏 (去标签、强对齐)
+        # ==========================================
         top_bar_layout = QHBoxLayout()
-        top_bar_layout.setContentsMargins(0, 0, 0, 0)  # 🌟 强行清空顶部默认边距，确立绝对左边缘！
-        top_bar_layout.addWidget(QLabel("端口:"))
+        top_bar_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 【左区：硬件连接控制】
         self.combo_port = AutoRefreshComboBox(self)
-        self.combo_port.setMinimumWidth(80)
-        self.refresh_serial_ports()
+        self.combo_port.setMinimumWidth(130)
+        self.combo_port.setToolTip("选择物理串口或网络接口")
+        self.combo_port.currentTextChanged.connect(self._on_port_changed)
         top_bar_layout.addWidget(self.combo_port)
+
+        self.input_ip = QLineEdit("192.168.1.100")
+        self.input_ip.setMinimumWidth(110)
+        self.input_ip.setPlaceholderText("目标 IP")
+        self.input_ip.setVisible(False)
+        top_bar_layout.addWidget(self.input_ip)
 
         self.btn_refresh_port = QPushButton("🔄")
         self.btn_refresh_port.setFixedWidth(30)
+        self.btn_refresh_port.setToolTip("刷新可用端口")
         self.btn_refresh_port.clicked.connect(self.refresh_serial_ports)
         top_bar_layout.addWidget(self.btn_refresh_port)
 
-        top_bar_layout.addWidget(QLabel("波特率:"))
         self.combo_baud = QComboBox()
-        self.combo_baud.addItems(["115200", "921600"])
+        self.combo_baud.addItems(["115200", "921600", "9600"])
+        self.combo_baud.setToolTip("选择波特率")
         top_bar_layout.addWidget(self.combo_baud)
 
+        self.input_net_port = QLineEdit("8080")
+        self.input_net_port.setFixedWidth(60)
+        self.input_net_port.setPlaceholderText("端口")
+        self.input_net_port.setVisible(False)
+        top_bar_layout.addWidget(self.input_net_port)
+
         self.btn_serial_toggle = QPushButton("🔌 打开")
-        self.btn_serial_toggle.clicked.connect(self.toggle_serial)
+        self.btn_serial_toggle.clicked.connect(self.toggle_connection)
         top_bar_layout.addWidget(self.btn_serial_toggle)
 
-        top_bar_layout.addWidget(QLabel("📜 协议:"))
+        # 【右区：业务与解析过滤】
         self.combo_protocol = QComboBox()
+        self.combo_protocol.setMinimumWidth(150)
+        self.combo_protocol.setToolTip("选择报文解析协议")
         self.populate_protocols()
         self.combo_protocol.currentIndexChanged.connect(self.change_protocol)
         top_bar_layout.addWidget(self.combo_protocol)
 
         self.quick_parse_input = QLineEdit()
-        self.quick_parse_input.setPlaceholderText("粘贴报文解析...")
+        self.quick_parse_input.setPlaceholderText("粘贴单条报文解析...")
+        self.quick_parse_input.setMinimumWidth(150)
         top_bar_layout.addWidget(self.quick_parse_input)
-        self.quick_parse_btn = QPushButton("🚀 解析")
+
+        self.quick_parse_btn = QPushButton("🚀")
+        self.quick_parse_btn.setToolTip("快速解析此报文")
+        self.quick_parse_btn.setFixedWidth(30)
         self.quick_parse_btn.clicked.connect(self.on_quick_parse_clicked)
         top_bar_layout.addWidget(self.quick_parse_btn)
 
         self.combo_filter = QComboBox()
+        self.combo_filter.setMinimumWidth(130)
         self.combo_filter.addItem("显示所有类型", "ALL")
+        self.combo_filter.setToolTip("按报文类型过滤")
         self.combo_filter.currentIndexChanged.connect(self.apply_filter)
         top_bar_layout.addWidget(self.combo_filter)
 
-        self.btn_load = QPushButton("📂 日志")
-        self.btn_load.clicked.connect(self.load_file)
-        top_bar_layout.addWidget(self.btn_load)
-
-        self.btn_theme = QPushButton("☀️ 浅色")
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        top_bar_layout.addWidget(self.btn_theme)
-        # ==========================================
-        # 🌟 3. 新增：左右面板显隐控制按钮
-        # ==========================================
-        self.btn_toggle_left = QPushButton("🖥️ 串口终端")
-        self.btn_toggle_left.setCheckable(True)
-        self.btn_toggle_left.setChecked(True)  # 默认显示并处于按下状态
-        self.btn_toggle_left.clicked.connect(self.toggle_left_panel)
-        top_bar_layout.addWidget(self.btn_toggle_left)
-
-        self.btn_toggle_right = QPushButton("📊 解析面板")
-        self.btn_toggle_right.setCheckable(True)
-        self.btn_toggle_right.setChecked(True)  # 默认显示并处于按下状态
-        self.btn_toggle_right.clicked.connect(self.toggle_right_panel)
-        top_bar_layout.addWidget(self.btn_toggle_right)
-
-        # ==========================================
-        # 🌟 1. 新增：发送面板显隐控制按钮
-        # ==========================================
-        self.btn_toggle_send = QPushButton("📤 发送面板")
-        self.btn_toggle_send.setCheckable(True)
-        self.btn_toggle_send.setChecked(False)  # 💡 默认不勾选（隐藏状态）
-        self.btn_toggle_send.clicked.connect(self.toggle_send_panel)
-        top_bar_layout.addWidget(self.btn_toggle_send)
-
-        # ==========================================
-        # 🌟 插入点 1：波形图显隐控制按钮
-        # ==========================================
-        self.btn_toggle_wave_main = QPushButton("📈 实时波形")
-        self.btn_toggle_wave_main.setCheckable(True)
-        self.btn_toggle_wave_main.setChecked(False)
-        self.btn_toggle_wave_main.clicked.connect(self.toggle_waveform_panel)
-        top_bar_layout.addWidget(self.btn_toggle_wave_main)
+        top_bar_layout.addStretch()
 
         main_layout.addLayout(top_bar_layout)
+        # ==========================================
+        # 🌟 插入点：离线日志回放控制面板 (默认隐藏)
+        # ==========================================
+        self.playback_panel = QWidget()
+
+        # 🔧 核心修复 1：死锁最大高度！绝对不允许它纵向膨胀 (35~40像素是黄金视觉比例)
+        self.playback_panel.setMaximumHeight(38)
+
+        pb_layout = QHBoxLayout(self.playback_panel)
+        # 🔧 核心修复 2：彻底干掉上下边距 (0)，只保留左右边距 (10) 防止文字贴边
+        pb_layout.setContentsMargins(10, 0, 10, 0)
+        self.playback_panel.setStyleSheet("border: 1px solid #6B7280; border-radius: 4px;")
+
+        self.lbl_pb_file = QLabel("当前文件: 无")
+        self.lbl_pb_file.setStyleSheet("color: #10B981; font-weight: bold;")
+        pb_layout.addWidget(self.lbl_pb_file)
+
+        self.btn_pb_play = QPushButton("⏸️ 暂停")
+        self.btn_pb_play.clicked.connect(self.toggle_playback_pause)
+        pb_layout.addWidget(self.btn_pb_play)
+
+        self.btn_pb_stop = QPushButton("⏹️ 停止")
+        self.btn_pb_stop.clicked.connect(self.stop_playback)
+        pb_layout.addWidget(self.btn_pb_stop)
+
+        pb_layout.addWidget(QLabel("倍速:"))
+        self.combo_pb_speed = QComboBox()
+        self.combo_pb_speed.addItems(["1x", "2x", "5x", "10x", "极速Max"])
+        self.combo_pb_speed.setCurrentText("2x")
+        self.combo_pb_speed.currentTextChanged.connect(self.change_playback_speed)
+        pb_layout.addWidget(self.combo_pb_speed)
+
+        self.lbl_pb_progress = QLabel("进度: 0 / 0 行")
+        pb_layout.addWidget(self.lbl_pb_progress)
+
+        pb_layout.addStretch()
+
+        self.btn_pb_close = QPushButton("❌ 关闭回放")
+        self.btn_pb_close.setStyleSheet("color: #EF4444;")
+        self.btn_pb_close.clicked.connect(self.close_playback_panel)
+        pb_layout.addWidget(self.btn_pb_close)
+
+        self.playback_panel.setVisible(False)
+        main_layout.addWidget(self.playback_panel)
+        # ==================== 回放面板结束 ====================
 
         # 三屏联动布局
         #main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1129,14 +1428,9 @@ class EcuMainWindow(QMainWindow):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索...")
-
-        # 🌟 1. 设置最小宽度保证基本显示，设置最大宽度防止在 4K 屏上长得太离谱
-        self.search_input.setMinimumWidth(140)
-        self.search_input.setMaximumWidth(400)
-
-        # 🌟 2. 赋予它“弹性”：水平方向尽量膨胀，垂直方向保持固定高度
+        self.search_input.setMinimumWidth(100)  # 缩小一点，省空间
+        self.search_input.setMaximumWidth(250)
         self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
         self.search_input.textChanged.connect(self.on_search_text_changed)
 
         self.btn_search_prev = QPushButton("⬆️")
@@ -1147,67 +1441,65 @@ class EcuMainWindow(QMainWindow):
         self.btn_search_next.setToolTip("向下查找")
         self.btn_search_next.clicked.connect(self.search_next)
 
-        self.cb_filter_mode = QPushButton("🎯 过滤")
-        self.cb_filter_mode.setCheckable(True)
-        self.cb_filter_mode.setToolTip("开启/关闭仅显匹配行")
-        self.cb_filter_mode.toggled.connect(lambda checked: self.redraw_terminal_history())
-
-        self.cb_timestamp = QPushButton("⏱️ 时戳")
-        self.cb_timestamp.setCheckable(True)
-        self.cb_timestamp.setChecked(True)
-        self.cb_timestamp.setToolTip("开启/关闭时间戳注入")
-
-        # ==========================================
-        # 🌟 1. 新增：接收 HEX 显示切换开关
-        # ==========================================
-        self.cb_hex_display = QPushButton("🔢 HEX接收")
-        self.cb_hex_display.setCheckable(True)
-        self.cb_hex_display.setChecked(False)  # 默认正常ASCII显示
-        self.cb_hex_display.setToolTip("开启后，接收到的数据将以16进制格式显示")
-        self.cb_hex_display.clicked.connect(self.redraw_terminal_history)
-
-        self.cb_auto_scroll = QPushButton("⏬ 滚动")
-        self.cb_auto_scroll.setCheckable(True)
-        self.cb_auto_scroll.setChecked(True)
-        self.cb_auto_scroll.setToolTip("弹起以冻结视口，按下恢复自动滚动")
+        # 🌟 极致去文字化：变成纯图标按钮
+        self.btn_filter_mode = QPushButton("🎯")
+        self.btn_filter_mode.setCheckable(True)
+        self.btn_filter_mode.setToolTip("开启/关闭仅显匹配行 (过滤模式)")
+        self.btn_filter_mode.toggled.connect(lambda checked: self.redraw_terminal_history())
 
         self.btn_clear_term = QPushButton("🗑️")
         self.btn_clear_term.setToolTip("清空控制台日志")
         self.btn_clear_term.clicked.connect(self.clear_all_data)
 
-        self.btn_more = QPushButton("⋮ 更多")
+        # 🌟 更多菜单依然保留，但也压缩成图标
+        self.btn_more = QPushButton("⋮")
+        self.btn_more.setToolTip("更多功能 (保存、录制、高亮)")
         more_menu = QMenu(self)
-
         action_save = more_menu.addAction("💾 保存当前快照")
         action_save.triggered.connect(self.save_raw_log)
-
         self.action_record = more_menu.addAction("⏺️ 开始实时录制")
         self.action_record.triggered.connect(self.toggle_recording)
-
         more_menu.addSeparator()
-
         action_regex = more_menu.addAction("⚙️ 自定义高亮配置")
         action_regex.triggered.connect(self.open_regex_config)
-
         self.btn_more.setMenu(more_menu)
 
-        # 🌟 按照从左到右的顺序，依次加入布局
+        # 🌟 按照极简顺序，依次加入布局
         term_toolbar.addWidget(self.search_input)
         term_toolbar.addWidget(self.btn_search_prev)
         term_toolbar.addWidget(self.btn_search_next)
-        term_toolbar.addWidget(self.cb_filter_mode)
-        term_toolbar.addWidget(self.cb_timestamp)
-        term_toolbar.addWidget(self.cb_hex_display)
-        term_toolbar.addWidget(self.cb_auto_scroll)
+        term_toolbar.addWidget(self.btn_filter_mode)
         term_toolbar.addWidget(self.btn_clear_term)
         term_toolbar.addWidget(self.btn_more)
-        # 🚨 终极修复：把弹簧加在【所有按钮的最后面】！
-        # 这样不管你怎么放大窗口，巨大的弹簧都在右侧，把所有按钮死死顶在左边！
+        # ✅ 把弹簧加在【所有按钮】的最后面：
         term_toolbar.addStretch()
         left_layout.addLayout(term_toolbar)
 
         self.raw_log_console = TerminalTextEdit(self)
         left_layout.addWidget(self.raw_log_console)
+
+        # ==========================================
+        # 🌟 诞生：黑窗口的极客右键菜单 (QAction 替代 QCheckBox/QPushButton)
+        # ==========================================
+        self.raw_log_console.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.raw_log_console.customContextMenuRequested.connect(self.show_terminal_menu)
+
+        self.action_timestamp = QAction("⏰ 显示时间戳", self)
+        self.action_timestamp.setCheckable(True)
+        self.action_timestamp.setChecked(True)
+
+        self.action_hex = QAction("🔢 HEX 原始字节显示", self)
+        self.action_hex.setCheckable(True)
+        self.action_hex.triggered.connect(self.redraw_terminal_history)
+
+        self.action_autoscroll = QAction("⏬ 接收时自动滚动到底部", self)
+        self.action_autoscroll.setCheckable(True)
+        self.action_autoscroll.setChecked(True)
+
+        self.action_wordwrap = QAction("↩️ 自动换行", self)
+        self.action_wordwrap.setCheckable(True)
+        self.action_wordwrap.setChecked(True)
+        self.action_wordwrap.triggered.connect(self.toggle_word_wrap)
 
         # ==========================================
         # 🌟 2. 新增：底部发送面板 (默认隐藏)
@@ -1306,9 +1598,53 @@ class EcuMainWindow(QMainWindow):
         wave_toolbar.addWidget(self.btn_reset_vars)
         wave_toolbar.addStretch()
 
+        # ==========================================
+        # 🌟 新增：GPS 雷达专属工具栏 (默认隐藏)
+        # ==========================================
+        self.gps_toolbar_widget = QWidget()
+        gps_layout = QHBoxLayout(self.gps_toolbar_widget)
+        gps_layout.setContentsMargins(0, 0, 0, 0)
+
+        gps_layout.addWidget(QLabel("🎯 基准: "))
+        self.input_anchor_lat = QLineEdit()
+        self.input_anchor_lat.setPlaceholderText("纬度 (Lat)")
+        self.input_anchor_lat.setMaximumWidth(100)
+        self.input_anchor_lng = QLineEdit()
+        self.input_anchor_lng.setPlaceholderText("经度 (Lng)")
+        self.input_anchor_lng.setMaximumWidth(100)
+        gps_layout.addWidget(self.input_anchor_lat)
+        gps_layout.addWidget(self.input_anchor_lng)
+
+        self.btn_set_anchor = QPushButton("📍 设为中心")
+        self.btn_set_anchor.clicked.connect(self.set_manual_anchor)
+        gps_layout.addWidget(self.btn_set_anchor)
+
+        self.btn_auto_anchor = QPushButton("🔄 以当前点为中心")
+        self.btn_auto_anchor.clicked.connect(self.set_auto_anchor)
+        gps_layout.addWidget(self.btn_auto_anchor)
+
+        self.lbl_gps_stats = QLabel("当前偏差: -- m | 最大漂移: -- m")
+        self.lbl_gps_stats.setStyleSheet("color: #EAB308; font-weight: bold; margin-left: 10px;")
+        gps_layout.addWidget(self.lbl_gps_stats)
+
+        gps_layout.addStretch()
+
+        self.btn_export_kml = QPushButton("🗺️ 导出 KML")
+        self.btn_export_kml.setStyleSheet("background-color: #0284C7; color: white;")
+        self.btn_export_kml.clicked.connect(self.export_kml)
+        gps_layout.addWidget(self.btn_export_kml)
+
+        wave_layout.addWidget(self.gps_toolbar_widget)
+        self.gps_toolbar_widget.hide()  # 初始状态隐藏
+
+        # 🌟 初始化雷达状态变量
+        self.gps_anchor = None  # 格式: (lng, lat)
+        self.max_drift_m = 0.0
+        self.radar_circle_items = []  # 存放画在图上的同心圆
+
         self.btn_close_wave = QPushButton("❌ 关闭图表")
         self.btn_close_wave.clicked.connect(
-            lambda: self.btn_toggle_wave_main.setChecked(False) or self.toggle_waveform_panel())
+            lambda: self.action_toggle_wave.setChecked(False) or self.toggle_waveform_panel())
         wave_toolbar.addWidget(self.btn_close_wave)
 
         wave_layout.addLayout(wave_toolbar)
@@ -1424,6 +1760,53 @@ class EcuMainWindow(QMainWindow):
         quick_cmd_layout.addLayout(quick_cmd_btn_layout)
 
         self.right_tabs.addTab(self.quick_cmd_panel, "🚀 快捷指令")
+        # ------------------------------------------
+        # 🗂️ Tab 3: 🤖 自动化宏 (流水线脚本)
+        # ------------------------------------------
+        self.macro_panel = QWidget()
+        macro_layout = QVBoxLayout(self.macro_panel)
+
+        self.macro_table = QTableWidget(0, 4)
+        self.macro_table.setHorizontalHeaderLabels(["发送报文内容", "格式", "发后延时(ms)", "操作"])
+        self.macro_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.macro_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.macro_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.macro_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.macro_table.setColumnWidth(1, 80)
+        self.macro_table.setColumnWidth(2, 100)
+        self.macro_table.setColumnWidth(3, 60)
+        self.macro_table.setAlternatingRowColors(True)
+
+        macro_ctrl_layout = QHBoxLayout()
+        btn_add_macro = QPushButton("➕ 添加动作")
+        btn_add_macro.clicked.connect(lambda: self.add_macro_row("", "HEX", 500))
+
+        self.spin_macro_loop = QSpinBox()
+        self.spin_macro_loop.setRange(1, 99999)
+        self.spin_macro_loop.setValue(1)
+        self.spin_macro_loop.setPrefix("循环跑: ")
+        self.spin_macro_loop.setSuffix(" 次")
+        self.spin_macro_loop.setMinimumWidth(120)
+
+        self.btn_run_macro = QPushButton("▶️ 运行脚本")
+        self.btn_run_macro.setStyleSheet("background-color: #10B981; color: white; font-weight: bold;")
+        self.btn_run_macro.clicked.connect(self.start_macro)
+
+        self.btn_stop_macro = QPushButton("⏹️ 紧急停止")
+        self.btn_stop_macro.setStyleSheet("background-color: #EF4444; color: white; font-weight: bold;")
+        self.btn_stop_macro.setEnabled(False)
+        self.btn_stop_macro.clicked.connect(self.stop_macro)
+
+        macro_ctrl_layout.addWidget(btn_add_macro)
+        macro_ctrl_layout.addStretch()
+        macro_ctrl_layout.addWidget(self.spin_macro_loop)
+        macro_ctrl_layout.addWidget(self.btn_run_macro)
+        macro_ctrl_layout.addWidget(self.btn_stop_macro)
+
+        macro_layout.addWidget(self.macro_table)
+        macro_layout.addLayout(macro_ctrl_layout)
+
+        self.right_tabs.addTab(self.macro_panel, "🤖 自动化测试")
 
         # 🌟 3. 将组装好的右侧多标签页，加入到主分割器中
         self.main_splitter.addWidget(self.right_tabs)
@@ -1443,27 +1826,28 @@ class EcuMainWindow(QMainWindow):
         self.change_protocol()
         self.setStyleSheet(self.get_dark_qss())
         self.apply_terminal_style()
+        QTimer.singleShot(100, self.toggle_right_panel)
 
     # ==========================================
     # 🌟 显隐控制逻辑
     # ==========================================
     def toggle_left_panel(self):
-        is_visible = self.btn_toggle_left.isChecked()
+        is_visible = self.action_toggle_left.isChecked()
 
         # 保护机制：不能把两边都关了
         if not is_visible and not self.right_panel.isVisible():
-            self.btn_toggle_left.setChecked(True)  # 强制弹回
+            self.action_toggle_left.setChecked(True)  # 强制弹回
             QMessageBox.warning(self, "提示", "必须至少保留一个工作区！")
             return
 
         self.left_panel.setVisible(is_visible)
 
     def toggle_right_panel(self):
-        is_visible = self.btn_toggle_right.isChecked()
+        is_visible = self.action_toggle_right.isChecked()
 
         # 保护机制：不能把两边都关了
         if not is_visible and not self.left_panel.isVisible():
-            self.btn_toggle_right.setChecked(True)  # 强制弹回
+            self.action_toggle_right.setChecked(True)  # 强制弹回
             QMessageBox.warning(self, "提示", "必须至少保留一个工作区！")
             return
 
@@ -1473,7 +1857,7 @@ class EcuMainWindow(QMainWindow):
     # 🌟 发送面板控制逻辑
     # ==========================================
     def toggle_send_panel(self):
-        is_visible = self.btn_toggle_send.isChecked()
+        is_visible = self.action_toggle_send.isChecked()
         self.send_panel.setVisible(is_visible)
 
         # 体验优化：如果展开了发送面板，自动把光标聚焦到输入框，方便直接打字
@@ -1558,9 +1942,8 @@ class EcuMainWindow(QMainWindow):
             return
 
         # 1. 拦截未连接状态
-        if not self.serial_worker or getattr(self.serial_worker, 'serial',
-                                             None) is None or not self.serial_worker.serial.is_open:
-            QMessageBox.warning(self, "发送失败", "未连接到任何设备，请先打开串口！")
+        if not getattr(self, 'active_worker', None) or not self.active_worker.isRunning():
+            QMessageBox.warning(self, "发送失败", "未连接到任何设备，请先打开串口或网络！")
             return
 
         is_hex = self.radio_hex.isChecked()
@@ -1602,14 +1985,14 @@ class EcuMainWindow(QMainWindow):
             # ==========================================
             # 4. 最终执行底层发送
             # ==========================================
-            success, err_msg = self.serial_worker.send_data(data_to_send)
+            success, err_msg = self.active_worker.send_data(data_to_send)
 
             if success:
                 # 后续的存入时光机、UI回显过滤逻辑 (完全保持不变)
                 now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
                 self.terminal_history.append({'type': 'TX', 'time': now_str, 'data': data_to_send})
 
-                if self.cb_hex_display.isChecked():
+                if self.action_hex.isChecked():
                     display_text = "[上行] " + " ".join(f"{b:02X}" for b in data_to_send) + "\n"
                 else:
                     display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
@@ -1617,7 +2000,7 @@ class EcuMainWindow(QMainWindow):
                 # 过滤拦截逻辑
                 filter_kw = self.search_input.text().lower()
                 allow_render = True
-                is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+                is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
 
                 if is_filtering:
                     filter_kw = self.search_input.text().lower()
@@ -1642,8 +2025,8 @@ class EcuMainWindow(QMainWindow):
         # 并且 max_value > 0 防止刚启动没有任何日志时误触发
         if value == max_value and max_value > 0:
             # 如果此时“自动滚动”按钮是弹起（关闭）状态，就帮用户自动按下（开启）
-            if not self.cb_auto_scroll.isChecked():
-                self.cb_auto_scroll.setChecked(True)
+            if not self.action_autoscroll.isChecked():
+                self.action_autoscroll.setChecked(True)
                 # 可选：如果你想给用户一个视觉反馈，可以在状态栏提示一下
                 # self.statusBar().showMessage("⏬ 已触底，自动恢复实时滚动", 2000)
 
@@ -1744,11 +2127,12 @@ class EcuMainWindow(QMainWindow):
     def _execute_search(self, backward=False, is_typing_auto=False):
         from PyQt6.QtGui import QTextDocument, QTextCursor, QColor
         from PyQt6.QtWidgets import QTextEdit
+        self.raw_log_console._is_searching = True
         keyword = self.search_input.text()
         # ==========================================
         # 🌟 智能分流：如果当前是“过滤模式”，打字会触发全屏过滤重绘！
         # ==========================================
-        is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+        is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
         if is_filtering:
             if is_typing_auto:
                 # 只要打字手一停，立刻从历史里把过滤结果洗出来！
@@ -1818,8 +2202,9 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setFocus()
             self.raw_log_console.ensureCursorVisible()
             self.search_input.setStyleSheet("")
-            if self.cb_auto_scroll.isChecked():
-                self.cb_auto_scroll.setChecked(False)
+            if self.action_autoscroll.isChecked():
+                self.action_autoscroll.setChecked(False)
+                self.statusBar().showMessage("🎯 已定位到搜索目标，自动滚动已暂停", 2000)
 
             # 更新背景高亮
             self.update_viewport_search_highlights()
@@ -1827,49 +2212,117 @@ class EcuMainWindow(QMainWindow):
             self.search_input.setStyleSheet("border: 1px solid #EF4444;")
             self.current_search_hit_selection = None
             self.update_viewport_search_highlights()
+        QTimer.singleShot(100, lambda: setattr(self.raw_log_console, '_is_searching', False))
 
     # ==========================================
     # 其他业务逻辑 (数据接入、文件导出等)
     # ==========================================
     def refresh_serial_ports(self):
+        current = self.combo_port.currentText()
+        self.combo_port.blockSignals(True)
         self.combo_port.clear()
+
+        import serial.tools.list_ports
         ports = serial.tools.list_ports.comports()
-        for p in ports: self.combo_port.addItem(f"{p.device}", p.device)
 
-    def toggle_serial(self):
-        # 🌟 修复核心：不再依赖虚无缥缈的线程状态，而是直接根据按钮文字判断用户意图
+        # 1. 动态加载物理串口
+        for p in ports:
+            self.combo_port.addItem(f"{p.device} - {p.description}", p.device)
+
+        # 2. 追加网络虚拟接口 (利用 Data 字段存储真实的模式名)
+        self.combo_port.addItem("--- 网络联调 ---", None)
+        self.combo_port.addItem("🌐 TCP Client", "TCP Client")
+        self.combo_port.addItem("🌐 TCP Server", "TCP Server")
+        self.combo_port.addItem("🌐 UDP", "UDP")
+
+        index = self.combo_port.findText(current, Qt.MatchFlag.MatchContains)
+        if index >= 0:
+            self.combo_port.setCurrentIndex(index)
+
+        self.combo_port.blockSignals(False)
+        self._on_port_changed(self.combo_port.currentText())  # 强制触发一次变脸判断
+
+    def _on_port_changed(self, text):
+        """智能变脸：如果是网络就显示IP和端口，如果是串口就显示波特率"""
+        if not text or text == "--- 网络联调 ---": return
+
+        is_network = "🌐" in text
+
+        # 直接控制输入框的显隐，不再需要操作那几个被干掉的文字标签
+        self.btn_refresh_port.setVisible(not is_network)
+        self.input_ip.setVisible(is_network)
+
+        self.combo_baud.setVisible(not is_network)
+        self.input_net_port.setVisible(is_network)
+
+        # IP 自动填充逻辑
+        if "Server" in text or "UDP" in text:
+            self.input_ip.setText("0.0.0.0")
+        elif "Client" in text and self.input_ip.text() == "0.0.0.0":
+            self.input_ip.setText("192.168.1.100")
+
+    def toggle_connection(self):
+        # 1. 停止逻辑
         if self.btn_serial_toggle.text() == "🛑 停止" or self.btn_serial_toggle.text() == "关闭中...":
-            if self.serial_worker:
-                self.serial_worker.stop()
+            if getattr(self, 'active_worker', None):
+                self.active_worker.stop()
                 self.btn_serial_toggle.setText("关闭中...")
-                self.btn_serial_toggle.setEnabled(False)  # 临时禁用防连击，等待线程安全释放
+                self.btn_serial_toggle.setEnabled(False)
+        # 2. 启动逻辑
         else:
-            port = self.combo_port.currentData()
-            baud = self.combo_baud.currentText()
-            if not port:
-                QMessageBox.warning(self, "提示", "无可用的串口，请检查设备连接！")
-                return
+            port_text = self.combo_port.currentText()
+            if port_text == "--- 网络联调 ---": return  # 防呆拦截
 
-            self.rt_tx_parser = StreamParser(self.decoder)
-            self.rt_rx_parser = StreamParser(self.decoder)
+            is_network = "🌐" in port_text
+            if self.decoder:
+                self.rt_tx_parser = StreamParser(self.decoder)
+                self.rt_rx_parser = StreamParser(self.decoder)
+            else:
+                self.rt_tx_parser = None
+                self.rt_rx_parser = None
             self.serial_buffer_line = ""
 
-            self.serial_worker = SerialWorker(port, int(baud))
-            self.serial_worker.data_received.connect(self.on_serial_data_received)
+            # 区分底层引擎
+            if not is_network:
+                port = self.combo_port.currentData()
+                baud = self.combo_baud.currentText()
+                if not port:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "提示", "无可用的串口，请检查设备连接！")
+                    return
+                self.active_worker = SerialWorker(port, int(baud))
+                status_msg = f"状态: 正在监听串口 {port} ({baud}bps)"
+            else:
+                mode = self.combo_port.currentData()  # 这里取出的就是纯净的 "TCP Client" 等
+                ip = self.input_ip.text().strip()
+                try:
+                    net_port = int(self.input_net_port.text().strip())
+                except:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "提示", "网络端口必须是数字！")
+                    return
+                self.active_worker = NetworkWorker(mode, ip, net_port)
+                status_msg = f"状态: 网络 {mode} [{ip}:{net_port}] 运行中"
 
-            # ==========================================
-            # 🌟 关键修复：把底层的异常和退出信号接到 UI 上！
-            # ==========================================
-            self.serial_worker.error_occurred.connect(self.on_serial_error)
-            self.serial_worker.finished_signal.connect(self.on_serial_finished)
+            # 统一绑定数据接入口
+            self.active_worker.data_received.connect(self.on_serial_data_received)
+            self.active_worker.error_occurred.connect(self.on_serial_error)
+            self.active_worker.finished_signal.connect(self.on_serial_finished)
 
-            self.serial_worker.start()
+            if hasattr(self.active_worker, 'client_connected'):
+                self.active_worker.client_connected.connect(
+                    lambda addr: self.statusBar().showMessage(f"✅ TCP 客户端已接入: {addr}", 5000))
 
+            self.active_worker.start()
+
+            # 锁死 UI，防止运行期间瞎改
             self.btn_serial_toggle.setText("🛑 停止")
             self.btn_serial_toggle.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
             self.combo_port.setEnabled(False)
+            self.input_ip.setEnabled(False)
             self.combo_baud.setEnabled(False)
-            self.statusBar().showMessage(f"状态: 正在监听 {port} ({baud}bps)")
+            self.input_net_port.setEnabled(False)
+            self.statusBar().showMessage(status_msg)
 
     # ==========================================
     # 🌟 新增配套方法 1：弹窗提示底层报错，不再静默假死
@@ -1881,14 +2334,16 @@ class EcuMainWindow(QMainWindow):
     # 🌟 新增配套方法 2：绝对安全的 UI 状态重置 (无论正常关闭还是异常断开都会触发)
     # ==========================================
     def on_serial_finished(self):
+        """统一的资源释放恢复"""
         self.btn_serial_toggle.setText("🔌 打开")
         self.btn_serial_toggle.setStyleSheet("")
         self.btn_serial_toggle.setEnabled(True)
         self.combo_port.setEnabled(True)
+        self.input_ip.setEnabled(True)
         self.combo_baud.setEnabled(True)
-        self.statusBar().showMessage("状态: 串口已安全关闭")
+        self.input_net_port.setEnabled(True)
+        self.statusBar().showMessage("状态: 连接已安全关闭")
         self.current_log_filename = None
-        # 🌟 优化：彻底清空断开瞬间残留在内存中的半截字符串
         self.serial_buffer_line = ""
 
     def append_raw_log(self, text, custom_time=None, write_to_file=True, render_to_ui=True):
@@ -1902,7 +2357,7 @@ class EcuMainWindow(QMainWindow):
         is_empty = self.raw_log_console.document().isEmpty()
 
         # 1. 组装最终带有时间戳的文本
-        if self.cb_timestamp.isChecked():
+        if self.action_timestamp.isChecked():
             time_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
             time_prefix = f"[{time_str}] "
             final_text = time_prefix + clean_text if is_empty else "\n\n" + time_prefix + clean_text
@@ -1943,7 +2398,7 @@ class EcuMainWindow(QMainWindow):
 
         cursor.insertText(final_text)
 
-        if self.cb_auto_scroll.isChecked():
+        if self.action_autoscroll.isChecked():
             scrollbar.setValue(scrollbar.maximum())
         else:
             scrollbar.setValue(current_scroll)
@@ -1956,8 +2411,8 @@ class EcuMainWindow(QMainWindow):
             self.raw_log_console.setUpdatesEnabled(False)
             self.raw_log_console.clear()
 
-            is_hex = hasattr(self, 'cb_hex_display') and self.cb_hex_display.isChecked()
-            is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+            is_hex = hasattr(self, 'cb_hex_display') and self.action_hex.isChecked()
+            is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
             filter_kw = self.search_input.text().lower()
 
             for pkt in self.terminal_history:
@@ -2002,7 +2457,7 @@ class EcuMainWindow(QMainWindow):
         # 把最纯净的字节流塞进时光机
         self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
 
-        if hasattr(self, 'cb_hex_display') and self.cb_hex_display.isChecked():
+        if hasattr(self, 'cb_hex_display') and self.action_hex.isChecked():
             display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
         else:
             display_text = raw_bytes.decode('utf-8', errors='replace')
@@ -2032,7 +2487,7 @@ class EcuMainWindow(QMainWindow):
         # 🌟 核心拦截：只在开启“过滤模式”时才执行拦截！
         # ==========================================
         allow_render = True
-        is_filtering = hasattr(self, 'cb_filter_mode') and self.cb_filter_mode.isChecked()
+        is_filtering = hasattr(self, 'cb_filter_mode') and self.btn_filter_mode.isChecked()
 
         if is_filtering:
             filter_kw = self.search_input.text().lower()
@@ -2049,6 +2504,12 @@ class EcuMainWindow(QMainWindow):
                     display_text = "\n".join(matched_lines)
         # 传入带有当前真实时间的字符串，并由 allow_render 决定是否上屏
         self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
+
+        # ==========================================
+        # 🌟 性能护城河：纯文本模式下，在此处直接截断，不进入底层解析引擎！
+        # ==========================================
+        if self.combo_protocol.currentText() == "纯文本(不解析)":
+            return
 
         # ==========================================
         # 🌟 2. 处理后台解析引擎 (不受 UI 开关影响)
@@ -2164,20 +2625,50 @@ class EcuMainWindow(QMainWindow):
         if self.rt_rx_parser: self.rt_rx_parser.buffer.clear()
         self.serial_buffer_line = ""
 
+    def toggle_word_wrap(self, state):
+        """智能切换终端的换行模式"""
+        from PyQt6.QtWidgets import QTextEdit
+        from PyQt6.QtCore import Qt
+        if state == Qt.CheckState.Checked.value:
+            # 🌟 名字统一换成 raw_log_console
+            self.raw_log_console.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        else:
+            self.raw_log_console.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+
     def populate_protocols(self):
-        self.combo_protocol.clear() # 防错机制：先清空原有列表
+        self.combo_protocol.clear()  # 防错机制：先清空原有列表
+
+        # ==========================================
+        # 🌟 强行置顶加入：纯文本模式！
+        # ==========================================
+        self.combo_protocol.addItem("纯文本(不解析)", "纯文本(不解析)")
+        # ==========================================
+        # 🌟 核心修复：建立“黑名单”，把系统自己用的 JSON 全排除掉
+        # ==========================================
+        exclude_files = ["highlight_rules.json", "quick_cmds.json"]
+
         # 🌟 修复：扫描 JSON 时，强制排除掉高亮配置文件
-        json_files = [f for f in os.listdir('.') if f.endswith('.json') and f != "highlight_rules.json"]
+        json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in exclude_files]
         for jf in json_files:
             self.combo_protocol.addItem(jf, jf)
 
     def change_protocol(self):
         protocol_file = self.combo_protocol.currentData()
         if not protocol_file: return
+
+        # ==========================================
+        # 🌟 核心防呆拦截：如果选了纯文本，直接清空底层解析器并返回！
+        # 绝对不让它去尝试打开一个叫“纯文本”的 JSON 文件
+        # ==========================================
+        if protocol_file == "纯文本(不解析)":
+            self.decoder = None
+            self.clear_all_data()
+            return
+
         try:
             self.decoder = ProtocolDecoder(protocol_file)
             self.clear_all_data()
-            if self.serial_worker and self.serial_worker.isRunning():
+            if getattr(self, 'serial_worker', None) and self.serial_worker.isRunning():
                 self.rt_tx_parser = StreamParser(self.decoder)
                 self.rt_rx_parser = StreamParser(self.decoder)
         except Exception as e:
@@ -2190,14 +2681,61 @@ class EcuMainWindow(QMainWindow):
         pass
 
     def load_file(self):
-        if self.decoder is None: return
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择日志文件", "", "Text Files (*.txt *.log);;All Files (*)")
-        if not file_path: return
+        """加载离线日志：即使没选协议，也要能打开文件"""
+        # 1. 即使没有 decoder，也要先让用户选文件，而不是直接 return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择日志文件",
+            "",
+            "Log Files (*.log *.txt *.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        # 2. 如果选了文件，先清空旧数据
         self.clear_all_data()
-        self.worker = ParseWorker(file_path, self.decoder)
-        self.worker.batch_ready.connect(lambda frames: self.all_frames.extend(frames))
-        self.worker.finished.connect(self.on_parse_finished)
-        self.worker.start()
+
+        # 3. 分情况处理：
+        # 如果有协议，走原来的 ParseWorker 高速解析流程
+        if self.decoder:
+            self.worker = ParseWorker(file_path, self.decoder)
+            self.worker.batch_ready.connect(lambda frames: self.all_frames.extend(frames))
+            self.worker.finished.connect(self.on_parse_finished)
+            self.worker.start()
+        else:
+            # 如果是“纯文本”模式，直接把文件内容灌进黑窗口（或者弹窗提示选协议）
+            from PyQt6.QtWidgets import QMessageBox
+            # 建议：如果是纯文本模式，可以加载到黑窗口展示，或者提醒用户
+            reply = QMessageBox.information(
+                self,
+                "提示",
+                "当前处于[纯文本]模式，仅展示原始日志。\n如需解析表格，请先在顶部选择协议后再加载。",
+                QMessageBox.StandardButton.Ok
+            )
+            # 这里可以调用您现有的读取原始文件并显示的方法
+            self._display_raw_file(file_path)
+
+    def _display_raw_file(self, file_path):
+        """将原始日志文件内容读取并显示在终端黑窗口中"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # 为了防止文件过大导致 QTextEdit 崩溃
+                # 我们只读取最后 2000 行（配合我们之前的性能优化）
+                lines = f.readlines()
+                display_lines = lines[-2000:] if len(lines) > 2000 else lines
+
+                self.raw_log_console.clear()
+                # 拼接成一个大字符串一次性塞进去，比循环 append 快得多
+                self.raw_log_console.setPlainText("".join(display_lines))
+
+                # 滚动到底部
+                self.raw_log_console.moveCursor(QTextCursor.MoveOperation.End)
+
+                self.statusBar().showMessage(f"✅ 已加载原始日志: {file_path} (显示末尾2000行)", 5000)
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "读取失败", f"无法读取文件内容: {str(e)}")
 
     def on_parse_finished(self, total_count):
         for frame in self.all_frames:
@@ -2238,10 +2776,10 @@ class EcuMainWindow(QMainWindow):
         try:
             self.is_dark_mode = not self.is_dark_mode
             if self.is_dark_mode:
-                self.btn_theme.setText("☀️ 浅色")
+                self.action_theme.setText("☀️ 切换为浅色")
                 self.setStyleSheet(self.get_dark_qss())
             else:
-                self.btn_theme.setText("🌙 深色")
+                self.action_theme.setText("🌙 切换为深色")
                 self.setStyleSheet(self.get_light_qss())
             self.apply_terminal_style()
         finally:
@@ -2454,7 +2992,7 @@ class EcuMainWindow(QMainWindow):
     # 🌟 实时波形图核心支持逻辑
     # ==========================================
     def toggle_waveform_panel(self):
-        is_visible = self.btn_toggle_wave_main.isChecked()
+        is_visible = self.action_toggle_wave.isChecked()
         self.waveform_panel.setVisible(is_visible)
         if is_visible:
             # 智能展开：给波形图分配 30% 的屏幕高度
@@ -2465,6 +3003,8 @@ class EcuMainWindow(QMainWindow):
     def clear_waveform(self, *args):
         self.wave_data_x.clear()
         self.wave_data_y.clear()
+        self.max_drift_m = 0.0
+        self.lbl_gps_stats.setText("等待设备定位数据...")
 
         if not pg or not hasattr(self, 'plot_curve'): return
 
@@ -2472,21 +3012,29 @@ class EcuMainWindow(QMainWindow):
         if hasattr(self, 'latest_scatter') and self.latest_scatter:
             self.latest_scatter.setData([], [])
 
+        # 清理旧的雷达圈
+        for item in self.radar_circle_items:
+            self.plot_widget.removeItem(item)
+        self.radar_circle_items.clear()
+
         # ==========================================
-        # 🌟 智能图表变形：如果是轨迹，锁定比例尺！
+        # 🌟 智能变脸引擎：1D折线图 vs 2D雷达盘
         # ==========================================
         target_var = self.combo_wave_var.currentText()
-        is_gps = target_var.startswith("📍")
+        is_gps = target_var and target_var.startswith("📍")
 
-        # 极客细节：锁定长宽比，防止轨迹图变成“扁地图”或“长条地图”
         self.plot_widget.setAspectLocked(is_gps)
+        self.gps_toolbar_widget.setVisible(is_gps)  # 显隐 GPS 工具栏
 
         if is_gps:
-            self.plot_widget.setLabel('bottom', "Longitude (经度 X)")
-            self.plot_widget.setLabel('left', "Latitude (纬度 Y)")
+            self.plot_widget.setLabel('bottom', "东向偏移 (米 East)")
+            self.plot_widget.setLabel('left', "北向偏移 (米 North)")
+            self.plot_widget.showGrid(x=False, y=False)  # 关掉方格子
+            self.gps_anchor = None  # 重新等待锚点
         else:
             self.plot_widget.setLabel('bottom', "Samples (采样点)")
             self.plot_widget.setLabel('left', "Value (数值)")
+            self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
 
     def _extract_numerical_vars(self, data_dict, prefix=""):
         """像雷达一样扫描 JSON，模糊提取带有 lat/lng 字样的变量"""
@@ -2629,37 +3177,104 @@ class EcuMainWindow(QMainWindow):
         return d if isinstance(d, (int, float)) else None
 
     def update_plot_data(self, val):
-        """统一渲染引擎：自动识别 1D 还是 2D 并绘制"""
         if not pg or not hasattr(self, 'plot_curve'): return
-
-        # 👇 添加这行打印，如果在控制台看到这个打印，说明数据成功传到了绘图引擎！
-        # print(f"【绘图引擎】收到数据: {val}")
 
         try:
             if isinstance(val, tuple):
                 # ==========================================
-                # 📍 2D 坐标绘制：既画轨迹线，又画靶心
+                # 📍 2D 坐标绘制：计算距离并画靶盘
                 # ==========================================
-                self.wave_data_x.append(val[0])
-                self.wave_data_y.append(val[1])
+                lng, lat = val[0], val[1]
 
-                # 显式使用关键字传参，防止不同版本的 pyqtgraph 罢工
-                self.plot_curve.setData(x=list(self.wave_data_x), y=list(self.wave_data_y))
+                # 如果没有锚点，自动把第一个点当做 0,0 锚点
+                if self.gps_anchor is None:
+                    self.gps_anchor = (lng, lat)
+                    self.input_anchor_lng.setText(f"{lng:.6f}")
+                    self.input_anchor_lat.setText(f"{lat:.6f}")
+                    self.draw_radar_circles(10)  # 初始画一个 10米的圈
+
+                anchor_lng, anchor_lat = self.gps_anchor
+
+                # 极速 Flat-Earth 转换算法 (经纬度转相对米数)
+                lat_mid = math.radians(anchor_lat)
+                dx_m = (lng - anchor_lng) * 111320.0 * math.cos(lat_mid)
+                dy_m = (lat - anchor_lat) * 111000.0
+
+                drift_m = math.sqrt(dx_m ** 2 + dy_m ** 2)
+                if drift_m > self.max_drift_m:
+                    self.max_drift_m = drift_m
+                    self._check_and_expand_radar(drift_m)  # 动态量程检测
+
+                self.lbl_gps_stats.setText(f"当前偏差: {drift_m:.2f} m | 最大漂移: {self.max_drift_m:.2f} m")
+
+                self.wave_data_x.append(dx_m)
+                self.wave_data_y.append(dy_m)
+
+                # 这里我们改用 ScatterPlotItem 风格来渲染历史轨迹（散点）
+                # 为了性能，线框依然用 plot_curve 但设置成浅灰色半透明
+                self.plot_curve.setPen(pg.mkPen(color=(150, 150, 150, 100), width=1))
+                self.plot_curve.setData(x=list(self.wave_data_x), y=list(self.wave_data_y), symbol='o', symbolSize=4,
+                                        symbolBrush=(100, 100, 100, 150))
 
                 if hasattr(self, 'latest_scatter') and self.latest_scatter:
-                    self.latest_scatter.setData(x=[val[0]], y=[val[1]])
+                    self.latest_scatter.setData(x=[dx_m], y=[dy_m])
             else:
                 # ==========================================
-                # 📈 1D 波形绘制：隐藏靶心，只画 Y 值
+                # 📈 1D 波形绘制：恢复经典的绿色粗线
                 # ==========================================
                 self.wave_data_y.append(val)
-                self.plot_curve.setData(list(self.wave_data_y))
+                self.plot_curve.setPen(pg.mkPen(color='#10B981', width=2))
+                self.plot_curve.setData(y=list(self.wave_data_y), symbol=None)
 
                 if hasattr(self, 'latest_scatter') and self.latest_scatter:
                     self.latest_scatter.setData(x=[], y=[])
 
         except Exception as e:
-            print(f"🚨 绘图渲染失败: {e}")
+            print(f"绘图渲染失败: {e}")
+
+    def _check_and_expand_radar(self, current_drift):
+        """自动调整雷达圈量程 (1-2-5 步进)"""
+        scales = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000]
+        target_scale = 10
+        for s in scales:
+            if s > current_drift:
+                target_scale = s
+                break
+        self.draw_radar_circles(target_scale)
+
+    def draw_radar_circles(self, max_radius):
+        """画极具科技感的同心圆和十字准星"""
+        for item in self.radar_circle_items:
+            self.plot_widget.removeItem(item)
+        self.radar_circle_items.clear()
+
+        # 决定画哪几个圈 (比如 max 是 10，就画 2, 5, 10)
+        radii = [max_radius]
+        if max_radius >= 5: radii.extend([max_radius * 0.5, max_radius * 0.2])
+
+        import numpy as np
+        theta = np.linspace(0, 2 * np.pi, 100)
+
+        for r in set(radii):
+            x = r * np.cos(theta)
+            y = r * np.sin(theta)
+            # 画虚线圆圈
+            circle = pg.PlotDataItem(x, y, pen=pg.mkPen(color=(16, 185, 129, 150), width=1, style=Qt.PenStyle.DashLine))
+            self.plot_widget.addItem(circle)
+            self.radar_circle_items.append(circle)
+
+            # 标注距离文本 (比如 "5m")
+            txt = pg.TextItem(f"{r}m", color=(16, 185, 129, 200), anchor=(0, 1))
+            txt.setPos(r * 0.7, r * 0.7)
+            self.plot_widget.addItem(txt)
+            self.radar_circle_items.append(txt)
+
+        # 画十字准星
+        cross_v = pg.PlotDataItem([0, 0], [-max_radius, max_radius], pen=pg.mkPen(color=(16, 185, 129, 100), width=1))
+        cross_h = pg.PlotDataItem([-max_radius, max_radius], [0, 0], pen=pg.mkPen(color=(16, 185, 129, 100), width=1))
+        self.plot_widget.addItem(cross_v)
+        self.plot_widget.addItem(cross_h)
+        self.radar_circle_items.extend([cross_v, cross_h])
 
     # ==========================================
     # 🌟 重置嗅探雷达
@@ -2682,6 +3297,284 @@ class EcuMainWindow(QMainWindow):
 
         # 体验优化：在底部状态栏给个提示
         self.statusBar().showMessage("✅ 变量雷达已重置，等待接收新变量...", 3000)
+
+    # ==========================================
+    # 🌟 GPS 锚点与 KML 导出功能
+    # ==========================================
+    def set_manual_anchor(self):
+        try:
+            lat = float(self.input_anchor_lat.text())
+            lng = float(self.input_anchor_lng.text())
+            self.gps_anchor = (lng, lat)
+            # 清空历史数据，重新基于新锚点打点
+            self.wave_data_x.clear()
+            self.wave_data_y.clear()
+            self.max_drift_m = 0.0
+            self.draw_radar_circles(5)  # 默认从 5米 圈开始
+            self.statusBar().showMessage("✅ 已锁定绝对真值锚点！", 3000)
+        except ValueError:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "输入错误", "请输入正确的经纬度数值！")
+
+    def set_auto_anchor(self):
+        self.gps_anchor = None
+        self.wave_data_x.clear()
+        self.wave_data_y.clear()
+        self.max_drift_m = 0.0
+        self.statusBar().showMessage("🔄 已重置锚点，将以收到的下一个坐标作为原点", 3000)
+
+    def export_kml(self):
+        if not self.gps_anchor or not self.wave_data_x:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "无数据", "当前没有有效的 GPS 轨迹数据可供导出！")
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+        from datetime import datetime
+
+        default_name = f"GNSS_Track_{datetime.now().strftime('%Y%m%d_%H%M%S')}.kml"
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出 KML 轨迹", default_name, "KML Files (*.kml)")
+        if not file_path: return
+
+        anchor_lng, anchor_lat = self.gps_anchor
+
+        # 逆向推算所有历史点的真实经纬度 (从相对于锚点的米数还原)
+        lat_mid = math.radians(anchor_lat)
+        coords_str = ""
+        for dx, dy in zip(self.wave_data_x, self.wave_data_y):
+            # 还原经纬度
+            p_lng = anchor_lng + (dx / (111320.0 * math.cos(lat_mid)))
+            p_lat = anchor_lat + (dy / 111000.0)
+            coords_str += f"{p_lng:.7f},{p_lat:.7f},0\n"
+
+        kml_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>GNSS Drift Radar Export</name>
+    <description>由上位机导出的静态漂移分析报告</description>
+
+    <Style id="anchorStyle">
+      <IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/ylw-stars.png</href></Icon></IconStyle>
+    </Style>
+    <Style id="trackStyle">
+      <LineStyle><color>990000ff</color><width>4</width></LineStyle>
+    </Style>
+
+    <Folder>
+      <name>静态基准点 (真值)</name>
+      <Placemark>
+        <name>Anchor (0,0)</name>
+        <styleUrl>#anchorStyle</styleUrl>
+        <Point><coordinates>{anchor_lng:.7f},{anchor_lat:.7f},0</coordinates></Point>
+      </Placemark>
+    </Folder>
+
+    <Folder>
+      <name>动态测试轨迹</name>
+      <Placemark>
+        <name>漂移轨迹</name>
+        <styleUrl>#trackStyle</styleUrl>
+        <LineString>
+          <tessellate>1</tessellate>
+          <altitudeMode>clampToGround</altitudeMode>
+          <coordinates>
+            {coords_str.strip()}
+          </coordinates>
+        </LineString>
+      </Placemark>
+    </Folder>
+  </Document>
+</kml>"""
+
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(kml_content)
+            self.statusBar().showMessage(f"✅ KML 成功导出至: {file_path}", 5000)
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "导出失败", f"写入文件时发生错误:\n{e}")
+
+    # ==========================================
+    # 🌟 离线日志回放 (时光倒流播放器) 核心逻辑
+    # ==========================================
+    def start_playback_dialog(self):
+        # 1. 冲突保护：绝不能一边开着真串口，一边放录像
+        if self.serial_worker and getattr(self.serial_worker, 'serial', None) and self.serial_worker.serial.is_open:
+            QMessageBox.warning(self, "冲突", "请先点击顶部【🛑 停止】关闭物理串口，再进行日志回放！")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择要回放的原始日志文件", "",
+                                                   "Text Files (*.txt *.log);;All Files (*)")
+        if not file_path: return
+
+        # 2. 界面准备 (大清洗)
+        self.clear_all_data()
+        self.playback_panel.setVisible(True)
+        import os
+        self.lbl_pb_file.setText(f"🎥 回放: {os.path.basename(file_path)}")
+        self.btn_pb_play.setText("⏸️ 暂停")
+
+        # 🌟 极客细节：回放时强制关掉自动追加时间戳，因为原始日志里本身就带时间戳，避免重复重叠！
+        self.action_timestamp.setChecked(False)
+
+        # 3. 引擎准备 (彻底复用串口的流式解析引擎)
+        if self.decoder:
+            self.rt_tx_parser = StreamParser(self.decoder)
+            self.rt_rx_parser = StreamParser(self.decoder)
+        self.serial_buffer_line = ""
+
+        # 4. 召唤播放器线程
+        speed_text = self.combo_pb_speed.currentText()
+        speed_val = self._parse_speed(speed_text)
+
+        self.playback_worker = PlaybackWorker(file_path, speed_val)
+        # 🔪 核心黑科技：把播放器吐出来的数据，直接硬塞给“串口数据接收器”！
+        self.playback_worker.data_received.connect(self.on_serial_data_received)
+        self.playback_worker.progress_updated.connect(self.update_playback_progress)
+        self.playback_worker.finished_signal.connect(self.on_playback_finished)
+        self.playback_worker.start()
+
+    def _parse_speed(self, text):
+        if "Max" in text: return 0
+        return int(text.replace("x", ""))
+
+    def change_playback_speed(self, text):
+        if hasattr(self, 'playback_worker') and self.playback_worker:
+            self.playback_worker.set_speed(self._parse_speed(text))
+
+    def toggle_playback_pause(self):
+        if hasattr(self, 'playback_worker') and self.playback_worker:
+            is_paused = self.playback_worker.toggle_pause()
+            self.btn_pb_play.setText("▶️ 播放" if is_paused else "⏸️ 暂停")
+
+    def stop_playback(self):
+        if hasattr(self, 'playback_worker') and self.playback_worker:
+            self.playback_worker.stop()
+            self.btn_pb_play.setText("▶️ 播放")
+
+    def update_playback_progress(self, current, total):
+        self.lbl_pb_progress.setText(f"进度: {current} / {total} 行")
+
+    def on_playback_finished(self):
+        self.btn_pb_play.setText("🔄 播放完毕")
+        self.statusBar().showMessage("✅ 日志动态回放结束！", 5000)
+
+    def close_playback_panel(self):
+        self.stop_playback()
+        self.playback_panel.setVisible(False)
+        self.statusBar().showMessage("状态: 回放面板已关闭，待命")
+
+    # ==========================================
+    # 🌟 自动化测试宏队列 核心逻辑
+    # ==========================================
+    def add_macro_row(self, data="", fmt="HEX", delay=500):
+        row = self.macro_table.rowCount()
+        self.macro_table.insertRow(row)
+
+        item_data = QTableWidgetItem(str(data))
+        self.macro_table.setItem(row, 0, item_data)
+
+        combo_fmt = QComboBox()
+        combo_fmt.addItems(["HEX", "ASCII"])
+        combo_fmt.setCurrentText(fmt)
+        self.macro_table.setCellWidget(row, 1, combo_fmt)
+
+        spin_delay = QSpinBox()
+        spin_delay.setRange(10, 3600000)  # 支持长达 1 小时的单步延时
+        spin_delay.setValue(int(delay))
+        self.macro_table.setCellWidget(row, 2, spin_delay)
+
+        btn_del = QPushButton("❌")
+        btn_del.setStyleSheet("color: #EF4444; font-weight: bold;")
+        # 通过 btn 的相对位置反查行号，极其优雅的防越界删法
+        btn_del.clicked.connect(lambda _, b=btn_del: self.delete_macro_row(b))
+        self.macro_table.setCellWidget(row, 3, btn_del)
+
+    def delete_macro_row(self, btn):
+        index = self.macro_table.indexAt(btn.pos())
+        if index.isValid():
+            self.macro_table.removeRow(index.row())
+
+    def start_macro(self):
+        if not getattr(self, 'active_worker', None) or not self.active_worker.isRunning():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "错误", "底层通信尚未就绪，请先打开物理串口/网络连接！")
+            return
+
+        macro_list = []
+        for i in range(self.macro_table.rowCount()):
+            data_item = self.macro_table.item(i, 0)
+            fmt_widget = self.macro_table.cellWidget(i, 1)
+            delay_widget = self.macro_table.cellWidget(i, 2)
+
+            data = data_item.text().strip() if data_item else ""
+            if data:
+                macro_list.append({
+                    'data': data,
+                    'fmt': fmt_widget.currentText() if fmt_widget else "HEX",
+                    'delay': delay_widget.value() if delay_widget else 500
+                })
+
+        if not macro_list:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "无数据", "自动化流水线为空，请至少添加一个动作！")
+            return
+
+        # 锁死 UI，防止运行期间瞎改
+        self.btn_run_macro.setEnabled(False)
+        self.btn_stop_macro.setEnabled(True)
+        self.macro_table.setEnabled(False)
+
+        loop_count = self.spin_macro_loop.value()
+        self.macro_worker = MacroWorker(macro_list, loop_count)
+        self.macro_worker.send_cmd_signal.connect(self._macro_execute_send)
+        self.macro_worker.row_highlight_signal.connect(self._macro_highlight_row)
+        self.macro_worker.log_signal.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
+        self.macro_worker.finished_signal.connect(self._macro_finished)
+        self.macro_worker.start()
+
+    def _macro_execute_send(self, data, fmt):
+        """极其优雅的“借刀杀人”：复用主窗口的发送流水线"""
+        self.send_input.setText(data)
+        if fmt == "HEX":
+            self.radio_hex.setChecked(True)
+        else:
+            self.radio_ascii.setChecked(True)
+
+        # 模拟点击发送按钮！这样动态校验和、加换行符、打印TX日志 全都会自动执行！
+        self.btn_send.click()
+
+    def _macro_highlight_row(self, row):
+        """在表格中通过颜色提示当前跑到哪一步了"""
+        from PyQt6.QtGui import QColor
+        bg_color = QColor("#047857" if self.is_dark_mode else "#D1FAE5")
+        default_color = QColor(Qt.GlobalColor.transparent)
+
+        for i in range(self.macro_table.rowCount()):
+            item = self.macro_table.item(i, 0)
+            if item: item.setBackground(bg_color if i == row else default_color)
+
+    def stop_macro(self):
+        if hasattr(self, 'macro_worker') and self.macro_worker:
+            self.macro_worker.stop()
+            self.statusBar().showMessage("⚠️ 自动化测试宏已被手动终止！", 3000)
+
+    def _macro_finished(self):
+        self.btn_run_macro.setEnabled(True)
+        self.btn_stop_macro.setEnabled(False)
+        self.macro_table.setEnabled(True)
+        self.statusBar().showMessage("✅ 自动化测试宏执行完毕！", 5000)
+
+    def show_terminal_menu(self, pos):
+        """弹出融合了标准复制和自定义开关的高级右键菜单"""
+        menu = self.raw_log_console.createStandardContextMenu()
+        menu.addSeparator()  # 加一条帅气的分割线
+        # 加上我们的极客开关
+        menu.addAction(self.action_timestamp)
+        menu.addAction(self.action_hex)
+        menu.addAction(self.action_autoscroll)
+        menu.addAction(self.action_wordwrap)
+        menu.exec(self.raw_log_console.mapToGlobal(pos))
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
