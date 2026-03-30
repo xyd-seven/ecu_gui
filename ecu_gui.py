@@ -735,40 +735,39 @@ class StreamParser:
             line = line.strip()
             if not line: continue
             line_lower = line.lower()
-            if "ble send" in line_lower or "ble recv" in line_lower or "ctrl send" in line_lower or "ctrl_recv" in line_lower or "mz_send" in line_lower or "mz_recv" in line_lower:
+
+            # 过滤不需要解析的非业务 Log
+            if any(k in line_lower for k in ["ble send", "ble recv", "ctrl send", "ctrl_recv"]):
                 continue
 
+            # 1. 尝试 HEX 日志格式 (带有 0000-000F 偏移量的)
             match = re.search(r'(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}:|[0-9A-Fa-f]{8}:)\s*(.*)', line)
             if match:
                 payload = match.group(1)
                 hex_part = re.split(r'\s{3,}', payload)[0]
                 pure_hex = re.sub(r'[^0-9a-fA-F]', '', hex_part)
-                if len(pure_hex) % 2 != 0: pure_hex = pure_hex[:-1]
-                if pure_hex:
-                    try:
-                        self.buffer.extend(bytes.fromhex(pure_hex))
-                    except:
-                        pass
-                continue
+                if pure_hex and len(pure_hex) % 2 == 0:
+                    self.buffer.extend(bytes.fromhex(pure_hex))
+                continue  # 🌟 核心：处理完就跳过，绝对不走下面的保底逻辑
 
+            # 2. 尝试 Server 端的带 Sync 头格式
             found_server_log = False
             for word in line.split():
                 word_clean = re.sub(r'[^0-9a-fA-F]', '', word)
                 if word_clean.lower().startswith(sync_hex) and len(word_clean) >= self.header_size * 2:
-                    if len(word_clean) % 2 != 0: word_clean = word_clean[:-1]
-                    try:
+                    if len(word_clean) % 2 == 0:
                         self.buffer.extend(bytes.fromhex(word_clean))
                         found_server_log = True
-                    except:
-                        pass
             if found_server_log: continue
-            if re.match(r'^[A-Z]/[A-Za-z0-9_]+', line): continue
 
+            # 3. 忽略日志等级头
+            if re.match(r'^[VIDWE]/[A-Z]+', line): continue
+
+            # 4. 终极保底：提取行内所有的 HEX 片段
             spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', line)
             chunks = spaced_text.split()
             for chunk in chunks:
-                if len(chunk) % 2 != 0: chunk = chunk[:-1]
-                if chunk:
+                if len(chunk) >= 2 and len(chunk) % 2 == 0:
                     try:
                         self.buffer.extend(bytes.fromhex(chunk))
                     except:
@@ -2397,36 +2396,40 @@ class EcuMainWindow(QMainWindow):
         # --- A. 插入包隔离带（仅在已有内容时插入） ---
         if not self.raw_log_console.document().isEmpty():
             spacer_format = QTextBlockFormat()
-            spacer_format.setLineHeight(80, 1)  # 这里控制包间距
+            spacer_format.setLineHeight(80, 1)
             spacer_format.clearBackground()
             cursor.insertBlock(spacer_format)
             cursor.insertText("")
 
             # --- B. 准备数据内容格式 ---
         block_format = QTextBlockFormat()
-        block_format.setLineHeight(120, 1)  # 这里控制包内行间距
+        block_format.setLineHeight(120, 1)
         block_format.setBottomMargin(0)
         cursor.insertBlock(block_format)
 
         # --- C. 逐行处理内容 ---
-        # 🌟 修复核心：使用 filter 过滤掉文本块末尾产生的无效空行
+        # 过滤掉无效空行，获取当前包的所有行
         lines = [l for l in text.splitlines() if l.strip()]
         import re
 
-        for i, line in enumerate(lines):
-            # 再次确认这一行不是纯空格
-            clean_l = line.strip()
-            if not clean_l:
-                continue
+        # 🌟 预先生成时间戳，确保整个包使用同一个时间
+        t_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        timestamp_prefix = f"[{t_str}] "
 
-            # 只有真正有内容，才组装时间戳
-            if self.action_timestamp.isChecked():
-                t_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                display_line = f"[{t_str}] {line}"  # 保持原样 line 避免破坏缩进
+        for i, line in enumerate(lines):
+            # 🌟 核心修复：只有第一行才加时间戳前缀
+            if self.action_timestamp.isChecked() and i == 0:
+                display_line = timestamp_prefix + line
+            elif self.action_timestamp.isChecked() and i > 0:
+                # 💡 可选优化：如果你希望后续行也对齐时间戳的宽度，可以加上相同长度的空格
+                # padding = " " * len(timestamp_prefix)
+                # display_line = padding + line
+                display_line = line  # 默认直接显示，不带时间戳
             else:
                 display_line = line
 
             char_format = QTextCharFormat()
+            # 识别关键字（背景高亮）
             if re.search(r"(?i)(error|fail|timeout|异常|失败)", display_line):
                 bg_color = QColor("#4A0000") if getattr(self, 'is_dark_mode', False) else QColor("#FFCCCC")
                 char_format.setBackground(bg_color)
@@ -2439,7 +2442,7 @@ class EcuMainWindow(QMainWindow):
             if i < len(lines) - 1:
                 cursor.insertText("\n")
 
-        # 3. 自动滚动
+        # 3. 统一滚动
         if self.action_autoscroll.isChecked():
             self.raw_log_console.verticalScrollBar().setValue(
                 self.raw_log_console.verticalScrollBar().maximum()
@@ -2543,71 +2546,25 @@ class EcuMainWindow(QMainWindow):
             for line in lines:
                 clean_line = line.strip()
                 if not clean_line: continue
+                line_lower = clean_line.lower()
 
-                # 🌟 核心：单行处理锁，确保一行只会被 feed 一次
-                is_line_parsed = False
-                _frames = []
+                # 1. 智能方向判定：根据关键字记忆当前行的解析方向
+                if any(k in line_lower for k in ["recv", "接收", "下行"]):
+                    self._last_parse_is_rx = True
+                elif any(k in line_lower for k in ["send", "发送", "上行"]):
+                    self._last_parse_is_rx = False
 
-                # 1. 尝试 HEX 格式解析 (优先级最高)
-                import re
-                hex_match = re.search(r'[0-9A-F]{4}-[0-9A-F]{4}:\s+([0-9A-F\s]{1,48})', clean_line, re.IGNORECASE)
+                is_rx = getattr(self, '_last_parse_is_rx', False)
+                parser = self.rt_rx_parser if is_rx else self.rt_tx_parser
 
-                if hex_match:
-                    hex_segment = hex_match.group(1).strip()
-                    is_new_packet = ("0000-0" in clean_line) and any(
-                        k in clean_line.lower() for k in ["nb_", "ctrl_", "send"])
-
-                    if is_new_packet:
-                        self._current_hex_buffer = hex_segment
-                        self._last_parse_is_rx = "recv" in clean_line.lower()
-                    else:
-                        self._current_hex_buffer += " " + hex_segment
-
-                    is_rx = getattr(self, '_last_parse_is_rx', False)
-                    parser = self.rt_rx_parser if is_rx else self.rt_tx_parser
-
-                    if parser is not None:
-                        _frames = parser.feed(self._current_hex_buffer)
-                        if _frames:
-                            for fr in _frames:
-                                fr['direction'] = '[下行]' if is_rx else '[上行]'
-                            parsed_frames.extend(_frames)
-                            self._current_hex_buffer = ""
-                            # 🌟 锁定：HEX 解析成功，不再往下走
-                            is_line_parsed = True
-
-                # 2. 如果 HEX 没解析出来，再尝试普通文本逻辑 (优先级中)
-                if not is_line_parsed:
-                    pure_data = re.sub(r'^(\[[^\]]+\]\s*)+', '', clean_line)
-                    pure_data = re.sub(r'^[VIDWE]/[A-Z]+\s+', '', pure_data)
-                    line_lower = pure_data.lower()
-
-                    # 🌟 使用 if-elif-else 互斥结构，彻底杜绝重复触发
-                    if any(k in line_lower for k in ["nb_recv", "接收"]):
-                        if self.rt_rx_parser:
-                            _f = self.rt_rx_parser.feed(pure_data)
-                            if _f:
-                                for f in _f: f['direction'] = '[下行]'
-                                parsed_frames.extend(_f)
-                                is_line_parsed = True
-
-                    elif any(k in line_lower for k in ["nb_send", "发送"]):
-                        if self.rt_tx_parser:
-                            _f = self.rt_tx_parser.feed(pure_data)
-                            if _f:
-                                for f in _f: f['direction'] = '[上行]'
-                                parsed_frames.extend(_f)
-                                is_line_parsed = True
-
-                    # 3. 最后的保底逻辑 (优先级最低)
-                    else:
-                        # 只有前两个都没中，才进这个保底
-                        parser = self.rt_tx_parser if self.rt_tx_parser else self.rt_rx_parser
-                        if parser:
-                            _f = parser.feed(pure_data)
-                            if _f:
-                                for f in _f: f['direction'] = ''
-                                parsed_frames.extend(_f)
+                # 2. 核心：将这一行喂给对应的解析器，且仅喂一次！
+                # 彻底抛弃 self._current_hex_buffer，让 StreamParser 内部处理缓冲
+                if parser:
+                    _f = parser.feed(clean_line)
+                    if _f:
+                        for f in _f:
+                            f['direction'] = '[下行]' if is_rx else '[上行]'
+                        parsed_frames.extend(_f)
 
             if parsed_frames:
                 for frame in parsed_frames:
