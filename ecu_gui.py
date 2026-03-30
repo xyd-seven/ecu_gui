@@ -366,6 +366,11 @@ class SerialWorker(QThread):
         try:
             # timeout 设为极小值，配合我们自己的空闲检测逻辑
             self.serial = serial.Serial(self.port, self.baudrate, timeout=0.01)
+            self.msleep(50)  # 让 DTR/RTS 电平导致的设备重启或毛刺飞一会儿
+            # ==========================================
+            # 🌟 核心修复：打开串口后瞬间清空系统底层的历史脏数据
+            # ==========================================
+            self.serial.reset_input_buffer()
 
             while self.running:
                 if self.serial.in_waiting:
@@ -840,32 +845,49 @@ class PlaybackWorker(QThread):
 
     def run(self):
         try:
-            # 1. 极速扫描一遍文件，获取总行数，用于进度条显示
+            # 1. 极速扫描一遍文件，获取总行数，用于精确计算进度
             with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 total = sum(1 for _ in f)
 
-            # 2. 正式逐行读取并模拟串口喷发
+            # 2. 正式开始读取
             with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                batch_buffer = ""
+                # 🌟 核心优化 1：极速模式下，每 100 行打成一个大包发给主线程
+                batch_size = 100 if self.speed == 0 else 1
+                lines_in_batch = 0
+
                 for i, line in enumerate(f):
-                    # 暂停阻塞逻辑
+                    # 处理暂停逻辑
                     while self.is_paused and self.running:
                         self.msleep(50)
                     if not self.running:
                         break
 
-                    # 核心：将这一行文本强行转回 bytes，伪装成刚从串口读到的数据！
-                    self.data_received.emit(line.encode('utf-8'))
+                    batch_buffer += line
+                    lines_in_batch += 1
 
-                    # 降低 UI 刷新频率，防止进度条卡死主线程
+                    # 达到打包数量，或者已经是最后一行，发射给主线程！
+                    if lines_in_batch >= batch_size or i == total - 1:
+                        self.data_received.emit(batch_buffer.encode('utf-8'))
+                        batch_buffer = ""
+                        lines_in_batch = 0
+
+                        # ==========================================
+                        # 🌟 核心优化 2：极速模式下的“防卡死护城河”
+                        # 发送完一个 100 行的大包后，强迫后台线程休息 2 毫秒！
+                        # 这 2 毫秒就是留给主线程去重绘 UI 和解析正则的救命时间！
+                        # ==========================================
+                        if self.speed == 0:
+                            self.msleep(2)
+
+                    # 🌟 核心优化 3：极大地降低进度条刷新频率
+                    # 只有当进度跨越了 1% 时，才去刷新一次进度条，拒绝无效的 UI 重绘
                     if i % max(1, int(total / 100)) == 0 or i == total - 1:
                         self.progress_updated.emit(i + 1, total)
 
-                    # 3. 极其精准的倍速休眠控制
+                    # 常规倍速的休眠控制
                     if self.speed > 0:
-                        self.msleep(int(100 / self.speed))  # 1x = 100ms/行
-                    else:
-                        # 极速 Max 模式：每 100 行稍微让出一下 CPU 喘口气，防止把 UI 线程彻底卡死
-                        if i % 100 == 0: self.msleep(1)
+                        self.msleep(int(100 / self.speed))
 
         except Exception as e:
             print(f"🚨 回放引擎异常: {e}")
@@ -1489,6 +1511,7 @@ class EcuMainWindow(QMainWindow):
         self.action_timestamp = QAction("⏰ 显示时间戳", self)
         self.action_timestamp.setCheckable(True)
         self.action_timestamp.setChecked(True)
+        self.action_timestamp.triggered.connect(lambda checked=False: self.redraw_terminal_history())
 
         self.action_hex = QAction("🔢 HEX 原始字节显示", self)
         self.action_hex.setCheckable(True)
@@ -2355,58 +2378,72 @@ class EcuMainWindow(QMainWindow):
         if not text:
             return
 
-        clean_text = text.strip('\r\n')
-        if not clean_text:
-            return
-
-        is_empty = self.raw_log_console.document().isEmpty()
-
-        # 1. 组装最终带有时间戳的文本
-        if self.action_timestamp.isChecked():
-            time_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            time_prefix = f"[{time_str}] "
-            final_text = time_prefix + clean_text if is_empty else "\n\n" + time_prefix + clean_text
-        else:
-            final_text = clean_text if is_empty else "\n\n" + clean_text
-
-        # ==========================================
-        # 🌟 2. 永远优先写盘 (保证本地录制的 log 文件是 100% 完整的)
-        # ==========================================
-        if write_to_file and getattr(self, 'is_recording', False) and hasattr(self,
-                                                                              'record_file_handle') and self.record_file_handle:
+        # 1. 优先写原始文件
+        if write_to_file and getattr(self, 'is_recording', False) and getattr(self, 'record_file_handle', None):
             try:
-                self.record_file_handle.write(final_text)
+                self.record_file_handle.write(text + "\n")
                 self.record_file_handle.flush()
             except:
                 pass
 
-        # ==========================================
-        # 🚀 3. 性能护城河：如果被过滤掉了，到此为止，绝不消耗显卡和 CPU 去渲染！
-        # ==========================================
         if not render_to_ui:
             return
 
-        # 4. 只有通过过滤的数据，才进入极其消耗资源的 UI 渲染环节
-        scrollbar = self.raw_log_console.verticalScrollBar()
-        current_scroll = scrollbar.value()
+        # 2. 准备插入数据包
         cursor = self.raw_log_console.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
+        from PyQt6.QtGui import QTextBlockFormat, QTextCharFormat, QColor
 
+        # --- A. 插入包隔离带（仅在已有内容时插入） ---
+        if not self.raw_log_console.document().isEmpty():
+            spacer_format = QTextBlockFormat()
+            spacer_format.setLineHeight(80, 1)  # 这里控制包间距
+            spacer_format.clearBackground()
+            cursor.insertBlock(spacer_format)
+            cursor.insertText("")
+
+            # --- B. 准备数据内容格式 ---
         block_format = QTextBlockFormat()
-        block_format.setBottomMargin(8)
+        block_format.setLineHeight(120, 1)  # 这里控制包内行间距
+        block_format.setBottomMargin(0)
+        cursor.insertBlock(block_format)
+
+        # --- C. 逐行处理内容 ---
+        # 🌟 修复核心：使用 filter 过滤掉文本块末尾产生的无效空行
+        lines = [l for l in text.splitlines() if l.strip()]
         import re
-        if re.search(r"(?i)(error|fail|timeout|异常|失败)", final_text):
-            from PyQt6.QtGui import QColor
-            bg_color = QColor("#4A0000") if self.is_dark_mode else QColor("#FFCCCC")
-            block_format.setBackground(bg_color)
-        cursor.setBlockFormat(block_format)
 
-        cursor.insertText(final_text)
+        for i, line in enumerate(lines):
+            # 再次确认这一行不是纯空格
+            clean_l = line.strip()
+            if not clean_l:
+                continue
 
+            # 只有真正有内容，才组装时间戳
+            if self.action_timestamp.isChecked():
+                t_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                display_line = f"[{t_str}] {line}"  # 保持原样 line 避免破坏缩进
+            else:
+                display_line = line
+
+            char_format = QTextCharFormat()
+            if re.search(r"(?i)(error|fail|timeout|异常|失败)", display_line):
+                bg_color = QColor("#4A0000") if getattr(self, 'is_dark_mode', False) else QColor("#FFCCCC")
+                char_format.setBackground(bg_color)
+            else:
+                char_format.clearBackground()
+
+            cursor.insertText(display_line, char_format)
+
+            # 包内多行换行：只有不是最后一行才加回车
+            if i < len(lines) - 1:
+                cursor.insertText("\n")
+
+        # 3. 自动滚动
         if self.action_autoscroll.isChecked():
-            scrollbar.setValue(scrollbar.maximum())
-        else:
-            scrollbar.setValue(current_scroll)
+            self.raw_log_console.verticalScrollBar().setValue(
+                self.raw_log_console.verticalScrollBar().maximum()
+            )
 
     # ==========================================
     # 🌟 核心：历史数据重绘引擎
@@ -2450,6 +2487,13 @@ class EcuMainWindow(QMainWindow):
     def on_serial_data_received(self, raw_bytes):
         now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
+        # ==========================================
+        # 🌟 新增：内存保护机制（限制最大历史记录数）
+        # ==========================================
+        # 假设我们最多只在内存里保留 10 万条历史记录
+        if len(self.terminal_history) > 100000:
+            # 💡 技巧：不要每次删 1 条(pop(0)性能差)，一次性删掉最老的 1 万条，效率极高！
+            del self.terminal_history[:10000]
 
         # 🌟 修复：检查新变量 action_hex
         if hasattr(self, 'action_hex') and self.action_hex.isChecked():
@@ -2493,20 +2537,77 @@ class EcuMainWindow(QMainWindow):
             lines = self.serial_buffer_line.split('\n')
             self.serial_buffer_line = lines.pop()
             parsed_frames = []
+            # 🌟 状态记忆：用于拼接多行 HEX
+            self._current_hex_buffer = getattr(self, '_current_hex_buffer', "")
+
             for line in lines:
-                line_lower = line.lower()
-                if "nb_recv" in line_lower or "接收" in line_lower:
-                    _frames = self.rt_rx_parser.feed(line)
-                    for fr in _frames: fr['direction'] = '[下行]'
-                    parsed_frames.extend(_frames)
-                elif "nb_send" in line_lower or "发送" in line_lower:
-                    _frames = self.rt_tx_parser.feed(line)
-                    for fr in _frames: fr['direction'] = '[上行]'
-                    parsed_frames.extend(_frames)
-                else:
-                    _frames = self.rt_tx_parser.feed(line)
-                    for fr in _frames: fr['direction'] = ''
-                    parsed_frames.extend(_frames)
+                clean_line = line.strip()
+                if not clean_line: continue
+
+                # 🌟 核心：单行处理锁，确保一行只会被 feed 一次
+                is_line_parsed = False
+                _frames = []
+
+                # 1. 尝试 HEX 格式解析 (优先级最高)
+                import re
+                hex_match = re.search(r'[0-9A-F]{4}-[0-9A-F]{4}:\s+([0-9A-F\s]{1,48})', clean_line, re.IGNORECASE)
+
+                if hex_match:
+                    hex_segment = hex_match.group(1).strip()
+                    is_new_packet = ("0000-0" in clean_line) and any(
+                        k in clean_line.lower() for k in ["nb_", "ctrl_", "send"])
+
+                    if is_new_packet:
+                        self._current_hex_buffer = hex_segment
+                        self._last_parse_is_rx = "recv" in clean_line.lower()
+                    else:
+                        self._current_hex_buffer += " " + hex_segment
+
+                    is_rx = getattr(self, '_last_parse_is_rx', False)
+                    parser = self.rt_rx_parser if is_rx else self.rt_tx_parser
+
+                    if parser is not None:
+                        _frames = parser.feed(self._current_hex_buffer)
+                        if _frames:
+                            for fr in _frames:
+                                fr['direction'] = '[下行]' if is_rx else '[上行]'
+                            parsed_frames.extend(_frames)
+                            self._current_hex_buffer = ""
+                            # 🌟 锁定：HEX 解析成功，不再往下走
+                            is_line_parsed = True
+
+                # 2. 如果 HEX 没解析出来，再尝试普通文本逻辑 (优先级中)
+                if not is_line_parsed:
+                    pure_data = re.sub(r'^(\[[^\]]+\]\s*)+', '', clean_line)
+                    pure_data = re.sub(r'^[VIDWE]/[A-Z]+\s+', '', pure_data)
+                    line_lower = pure_data.lower()
+
+                    # 🌟 使用 if-elif-else 互斥结构，彻底杜绝重复触发
+                    if any(k in line_lower for k in ["nb_recv", "接收"]):
+                        if self.rt_rx_parser:
+                            _f = self.rt_rx_parser.feed(pure_data)
+                            if _f:
+                                for f in _f: f['direction'] = '[下行]'
+                                parsed_frames.extend(_f)
+                                is_line_parsed = True
+
+                    elif any(k in line_lower for k in ["nb_send", "发送"]):
+                        if self.rt_tx_parser:
+                            _f = self.rt_tx_parser.feed(pure_data)
+                            if _f:
+                                for f in _f: f['direction'] = '[上行]'
+                                parsed_frames.extend(_f)
+                                is_line_parsed = True
+
+                    # 3. 最后的保底逻辑 (优先级最低)
+                    else:
+                        # 只有前两个都没中，才进这个保底
+                        parser = self.rt_tx_parser if self.rt_tx_parser else self.rt_rx_parser
+                        if parser:
+                            _f = parser.feed(pure_data)
+                            if _f:
+                                for f in _f: f['direction'] = ''
+                                parsed_frames.extend(_f)
 
             if parsed_frames:
                 for frame in parsed_frames:
@@ -2530,6 +2631,8 @@ class EcuMainWindow(QMainWindow):
 
                 self.all_frames.extend(parsed_frames)
                 target_type = self.combo_filter.currentData()
+
+                # 1. 常规极速追加逻辑 (保证 99% 的时间表格渲染丝滑无卡顿)
                 if target_type == "ALL" or not target_type:
                     self.filtered_frames.extend(parsed_frames)
                     self.table_model.append_frames(parsed_frames)
@@ -2539,6 +2642,24 @@ class EcuMainWindow(QMainWindow):
                         self.filtered_frames.extend(valid_frames)
                         self.table_model.append_frames(valid_frames)
 
+                # ==========================================
+                # 🌟 核心修复：表格内存保护机制 (限制最大 10 万条)
+                # ==========================================
+                MAX_TABLE_ROWS = 100000
+                if len(self.all_frames) > MAX_TABLE_ROWS:
+                    # 1. 裁剪总数据池 (切片删除最老的 1 万条，性能极高)
+                    del self.all_frames[:10000]
+
+                    # 2. 重新根据当前的过滤规则洗一次数据
+                    if target_type == "ALL" or not target_type:
+                        self.filtered_frames = self.all_frames[:]
+                    else:
+                        self.filtered_frames = [f for f in self.all_frames if f['type'] == target_type]
+
+                    # 3. 强行通知 Qt 表格进行一次全量重绘，切断与旧数据的指针绑定
+                    self.table_model.update_data(self.filtered_frames)
+
+                # 触底自动滚动
                 if self.cb_table_auto_scroll.isChecked() and self.filtered_frames:
                     self.table_view.scrollToBottom()
 
@@ -3423,6 +3544,8 @@ class EcuMainWindow(QMainWindow):
 
     def update_playback_progress(self, current, total):
         self.lbl_pb_progress.setText(f"进度: {current} / {total} 行")
+        self.lbl_pb_progress.repaint()
+        QApplication.processEvents()
 
     def on_playback_finished(self):
         self.btn_pb_play.setText("🔄 播放完毕")
@@ -3544,6 +3667,33 @@ class EcuMainWindow(QMainWindow):
         menu.addAction(self.action_autoscroll)
         menu.addAction(self.action_wordwrap)
         menu.exec(self.raw_log_console.mapToGlobal(pos))
+
+    def closeEvent(self, event):
+        """🌟 优雅退出：窗口关闭时，安全终止所有后台线程，防止内存泄漏和报错"""
+        # 1. 停止物理总线
+        if getattr(self, 'active_worker', None) and self.active_worker.isRunning():
+            self.active_worker.stop()
+            self.active_worker.wait(500)  # 最多等它半秒钟交接工作
+
+        # 2. 停止回放放映机
+        if getattr(self, 'playback_worker', None) and self.playback_worker.isRunning():
+            self.playback_worker.stop()
+            self.playback_worker.wait(500)
+
+        # 3. 停止自动化测试流水线
+        if getattr(self, 'macro_worker', None) and self.macro_worker.isRunning():
+            self.macro_worker.stop()
+            self.macro_worker.wait(500)
+
+        # 4. 安全关闭正在写入的文件句柄
+        if getattr(self, 'is_recording', False) and getattr(self, 'record_file_handle', None):
+            try:
+                self.record_file_handle.close()
+            except:
+                pass
+
+        # 允许窗口正常关闭
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
