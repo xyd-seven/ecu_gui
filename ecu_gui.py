@@ -276,9 +276,9 @@ class TerminalTextEdit(QTextEdit):
         # 1. 极其关键：关闭历史撤销栈！(节省海量内存)
         self.setUndoRedoEnabled(False)
 
-        # 2. 性能护城河：将 50000 行缩减为 2000 行！
+        # 2. 性能护城河：将 50000 行缩减为 20000 行！
         # 这是解决 NMEA 海量数据下拖拽窗口卡顿的根本方法
-        self.document().setMaximumBlockCount(2000)
+        self.document().setMaximumBlockCount(20000)
 
         # 3. 初始保留自动换行 (后续由我们在工具栏加的 CheckBox 动态控制)
         self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -729,69 +729,62 @@ class StreamParser:
     def feed(self, raw_text):
         import re, struct
         lines = raw_text.splitlines()
-        sync_hex = self.SYNC_HEADER.hex().lower()
 
         for line in lines:
             line = line.strip()
             if not line: continue
-            line_lower = line.lower()
 
-            # 过滤不需要解析的非业务 Log
-            if any(k in line_lower for k in ["ble send", "ble recv", "ctrl send", "ctrl_recv"]):
-                continue
+            # 剥离时间戳前缀
+            pure_line = re.sub(r'^\[.*?\]\s*', '', line)
 
-            # 1. 尝试 HEX 日志格式 (带有 0000-000F 偏移量的)
-            match = re.search(r'(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}:|[0-9A-Fa-f]{8}:)\s*(.*)', line)
+            # 🌟 极简主义提取：只抓取标准格式数据，不合规的直接丢弃
+            match = re.search(r'(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}:|[0-9A-Fa-f]{8}:)\s*(.*)', pure_line)
             if match:
                 payload = match.group(1)
-                hex_part = re.split(r'\s{3,}', payload)[0]
-                pure_hex = re.sub(r'[^0-9a-fA-F]', '', hex_part)
-                if pure_hex and len(pure_hex) % 2 == 0:
-                    self.buffer.extend(bytes.fromhex(pure_hex))
-                continue  # 🌟 核心：处理完就跳过，绝对不走下面的保底逻辑
+                pure_hex = ""
+                # 严格提取前16个合法的 HEX 字节
+                for word in payload.split()[:16]:
+                    if len(word) == 2 and all(c in '0123456789abcdefABCDEF' for c in word):
+                        pure_hex += word
+                    else:
+                        break
 
-            # 2. 尝试 Server 端的带 Sync 头格式
-            found_server_log = False
-            for word in line.split():
-                word_clean = re.sub(r'[^0-9a-fA-F]', '', word)
-                if word_clean.lower().startswith(sync_hex) and len(word_clean) >= self.header_size * 2:
-                    if len(word_clean) % 2 == 0:
-                        self.buffer.extend(bytes.fromhex(word_clean))
-                        found_server_log = True
-            if found_server_log: continue
-
-            # 3. 忽略日志等级头
-            if re.match(r'^[VIDWE]/[A-Z]+', line): continue
-
-            # 4. 终极保底：提取行内所有的 HEX 片段
-            spaced_text = re.sub(r'[^0-9a-fA-F]', ' ', line)
-            chunks = spaced_text.split()
-            for chunk in chunks:
-                if len(chunk) >= 2 and len(chunk) % 2 == 0:
+                if pure_hex:
                     try:
-                        self.buffer.extend(bytes.fromhex(chunk))
+                        self.buffer.extend(bytes.fromhex(pure_hex))
                     except:
                         pass
 
+        # ==========================================
+        # 帧结构验证与提取
+        # ==========================================
         frames = []
         while True:
+            if not hasattr(self, 'SYNC_HEADER'):
+                break
             head_idx = self.buffer.find(self.SYNC_HEADER)
             if head_idx == -1:
                 keep = len(self.SYNC_HEADER) - 1 if len(self.buffer) > 0 else 0
                 self.buffer = self.buffer[-keep:]
                 break
             if head_idx > 0: self.buffer = self.buffer[head_idx:]
-            if len(self.buffer) < self.header_size: break
+            if len(self.buffer) < getattr(self, 'header_size', 2): break
 
             if getattr(self, 'len_size', 2) == 1:
                 body_len = self.buffer[self.len_offset]
             else:
                 body_len = struct.unpack('>H', self.buffer[self.len_offset: self.len_offset + 2])[0]
 
-            if self.len_includes_all:
+            if getattr(self, 'len_includes_all', False):
                 total_len = body_len
             else:
-                total_len = self.header_size + body_len + self.checksum_size
+                total_len = getattr(self, 'header_size', 2) + body_len + getattr(self, 'checksum_size', 0)
+
+            # 🌟 新增安全护盾：由于之前的串台可能导致解析出了异常巨大的长度，
+            # 强制拦截超过 2048 字节的无效包，丢弃当前包头，继续找下一个包！
+            if total_len > 2048:
+                self.buffer = self.buffer[1:]
+                continue
 
             if len(self.buffer) < total_len: break
 
@@ -799,6 +792,7 @@ class StreamParser:
             parsed_frame = self.process_frame(frame_bytes)
             if parsed_frame: frames.append(parsed_frame)
             self.buffer = self.buffer[total_len:]
+
         return frames
 
     def process_frame(self, data):
@@ -1743,6 +1737,11 @@ class EcuMainWindow(QMainWindow):
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["字段结构解析详情"])
         self.tree_view.setModel(self.tree_model)
+        # ==========================================
+        # 🌟 修复 1：开启树状视图自动换行
+        # 让长文本能够折行显示，不再一条道走到黑
+        # ==========================================
+        self.tree_view.setWordWrap(True)
 
         self.right_panel.addWidget(self.tree_view)
         self.right_panel.setSizes([500, 300])
@@ -2040,19 +2039,20 @@ class EcuMainWindow(QMainWindow):
             QMessageBox.critical(self, "数据转换错误", f"输入格式无法解析:\n{str(e)}")
 
     def _on_log_scrollbar_changed(self, value):
-        scrollbar = self.raw_log_console.verticalScrollBar()
+        # ==========================================
+        # 🌟 修复 1：漏掉的终极防抖锁！
+        # 只要是代码追加数据、或者 2000 行缓存触顶删行引起的跳动，
+        # 直接无视，绝对不允许触发自动滚动开关！
+        # ==========================================
+        if getattr(self.raw_log_console, '_is_appending', False):
+            return
 
-        # 获取当前滚动条的最大值
+        scrollbar = self.raw_log_console.verticalScrollBar()
         max_value = scrollbar.maximum()
 
-        # 💡 核心逻辑：如果当前值等于最大值，说明用户把日志拉到了最底下
-        # 并且 max_value > 0 防止刚启动没有任何日志时误触发
         if value == max_value and max_value > 0:
-            # 如果此时“自动滚动”按钮是弹起（关闭）状态，就帮用户自动按下（开启）
             if not self.action_autoscroll.isChecked():
                 self.action_autoscroll.setChecked(True)
-                # 可选：如果你想给用户一个视觉反馈，可以在状态栏提示一下
-                # self.statusBar().showMessage("⏬ 已触底，自动恢复实时滚动", 2000)
 
     # ==========================================
     # 🌟 搜索/雷达与过滤核心逻辑
@@ -2388,65 +2388,76 @@ class EcuMainWindow(QMainWindow):
         if not render_to_ui:
             return
 
-        # 2. 准备插入数据包
-        cursor = self.raw_log_console.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        from PyQt6.QtGui import QTextBlockFormat, QTextCharFormat, QColor
+        # ==========================================
+        # 🌟 修复 2：记录追加前状态，并严格上锁
+        # ==========================================
+        scrollbar = self.raw_log_console.verticalScrollBar()
+        current_scroll = scrollbar.value()
+        is_at_bottom = (current_scroll == scrollbar.maximum())
 
-        # --- A. 插入包隔离带（仅在已有内容时插入） ---
-        if not self.raw_log_console.document().isEmpty():
-            spacer_format = QTextBlockFormat()
-            spacer_format.setLineHeight(80, 1)
-            spacer_format.clearBackground()
-            cursor.insertBlock(spacer_format)
-            cursor.insertText("")
+        # 锁死信号流，告诉系统“现在是代码在操作，别瞎触发滚动事件”
+        self.raw_log_console._is_appending = True
 
-            # --- B. 准备数据内容格式 ---
-        block_format = QTextBlockFormat()
-        block_format.setLineHeight(120, 1)
-        block_format.setBottomMargin(0)
-        cursor.insertBlock(block_format)
+        try:
+            # 2. 准备插入数据包
+            cursor = self.raw_log_console.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            from PyQt6.QtGui import QTextBlockFormat, QTextCharFormat, QColor
 
-        # --- C. 逐行处理内容 ---
-        # 过滤掉无效空行，获取当前包的所有行
-        lines = [l for l in text.splitlines() if l.strip()]
-        import re
+            if not self.raw_log_console.document().isEmpty():
+                spacer_format = QTextBlockFormat()
+                spacer_format.setLineHeight(80, 1)
+                spacer_format.clearBackground()
+                cursor.insertBlock(spacer_format)
+                cursor.insertText("")
 
-        # 🌟 预先生成时间戳，确保整个包使用同一个时间
-        t_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        timestamp_prefix = f"[{t_str}] "
+            block_format = QTextBlockFormat()
+            block_format.setLineHeight(120, 1)
+            block_format.setBottomMargin(0)
+            cursor.insertBlock(block_format)
 
-        for i, line in enumerate(lines):
-            # 🌟 核心修复：只有第一行才加时间戳前缀
-            if self.action_timestamp.isChecked() and i == 0:
-                display_line = timestamp_prefix + line
-            elif self.action_timestamp.isChecked() and i > 0:
-                # 💡 可选优化：如果你希望后续行也对齐时间戳的宽度，可以加上相同长度的空格
-                # padding = " " * len(timestamp_prefix)
-                # display_line = padding + line
-                display_line = line  # 默认直接显示，不带时间戳
+            lines = [l for l in text.splitlines() if l.strip()]
+            import re
+
+            t_str = custom_time if custom_time else datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            timestamp_prefix = f"[{t_str}] "
+
+            for i, line in enumerate(lines):
+                if self.action_timestamp.isChecked() and i == 0:
+                    display_line = timestamp_prefix + line
+                elif self.action_timestamp.isChecked() and i > 0:
+                    display_line = line
+                else:
+                    display_line = line
+
+                char_format = QTextCharFormat()
+                if re.search(r"(?i)(error|fail|timeout|异常|失败)", display_line):
+                    bg_color = QColor("#4A0000") if getattr(self, 'is_dark_mode', False) else QColor("#FFCCCC")
+                    char_format.setBackground(bg_color)
+                else:
+                    char_format.clearBackground()
+
+                cursor.insertText(display_line, char_format)
+
+                if i < len(lines) - 1:
+                    cursor.insertText("\n")
+
+            # ==========================================
+            # 🌟 修复 3：对抗 Qt 的隐式滚动机制
+            # ==========================================
+            if self.action_autoscroll.isChecked():
+                scrollbar.setValue(scrollbar.maximum())
             else:
-                display_line = line
-
-            char_format = QTextCharFormat()
-            # 识别关键字（背景高亮）
-            if re.search(r"(?i)(error|fail|timeout|异常|失败)", display_line):
-                bg_color = QColor("#4A0000") if getattr(self, 'is_dark_mode', False) else QColor("#FFCCCC")
-                char_format.setBackground(bg_color)
-            else:
-                char_format.clearBackground()
-
-            cursor.insertText(display_line, char_format)
-
-            # 包内多行换行：只有不是最后一行才加回车
-            if i < len(lines) - 1:
-                cursor.insertText("\n")
-
-        # 3. 统一滚动
-        if self.action_autoscroll.isChecked():
-            self.raw_log_console.verticalScrollBar().setValue(
-                self.raw_log_console.verticalScrollBar().maximum()
-            )
+                # 用户要求暂停滚动！
+                # 即使刚被删了一行老数据，我们也要强行把视图定在原地
+                if is_at_bottom:
+                    scrollbar.setValue(current_scroll)
+        finally:
+            # ==========================================
+            # 🌟 修复 4：极其重要！追加完毕必须释放锁！
+            # 否则 _on_log_scrollbar_changed 会永久失效
+            # ==========================================
+            self.raw_log_console._is_appending = False
 
     # ==========================================
     # 🌟 核心：历史数据重绘引擎
@@ -2540,30 +2551,34 @@ class EcuMainWindow(QMainWindow):
             lines = self.serial_buffer_line.split('\n')
             self.serial_buffer_line = lines.pop()
             parsed_frames = []
-            # 🌟 状态记忆：用于拼接多行 HEX
-            self._current_hex_buffer = getattr(self, '_current_hex_buffer', "")
-
             for line in lines:
                 clean_line = line.strip()
                 if not clean_line: continue
                 line_lower = clean_line.lower()
 
-                # 1. 智能方向判定：根据关键字记忆当前行的解析方向
-                if any(k in line_lower for k in ["recv", "接收", "下行"]):
-                    self._last_parse_is_rx = True
-                elif any(k in line_lower for k in ["send", "发送", "上行"]):
-                    self._last_parse_is_rx = False
+                # ==========================================
+                # 🌟 终极护城河：严格白名单模式
+                # 遇到非 nb_ 的 HEX 日志（ble, ctrl, loop），直接开启“拉黑”状态
+                # ==========================================
+                if "d/hex" in line_lower:
+                    if "nb_recv" in line_lower:
+                        self._current_parse_target = "RX"
+                    elif "nb_send" in line_lower:
+                        self._current_parse_target = "TX"
+                    else:
+                        self._current_parse_target = "IGNORE"  # 其他一律拉黑
 
-                is_rx = getattr(self, '_last_parse_is_rx', False)
-                parser = self.rt_rx_parser if is_rx else self.rt_tx_parser
+                # 检查当前“白名单”状态
+                target = getattr(self, '_current_parse_target', "IGNORE")
+                if target == "IGNORE":
+                    continue  # 🌟 核心：直接丢弃，绝对不允许喂给解析器！
 
-                # 2. 核心：将这一行喂给对应的解析器，且仅喂一次！
-                # 彻底抛弃 self._current_hex_buffer，让 StreamParser 内部处理缓冲
+                parser = self.rt_rx_parser if target == "RX" else self.rt_tx_parser
                 if parser:
                     _f = parser.feed(clean_line)
                     if _f:
                         for f in _f:
-                            f['direction'] = '[下行]' if is_rx else '[上行]'
+                            f['direction'] = '[下行]' if target == "RX" else '[上行]'
                         parsed_frames.extend(_f)
 
             if parsed_frames:
@@ -2807,14 +2822,38 @@ class EcuMainWindow(QMainWindow):
         self.tree_view.expandAll()
 
     def _populate_tree(self, parent_item, data_node):
+        # 1. 处理字典结构
         if isinstance(data_node, dict):
             for key, val in data_node.items():
-                if isinstance(val, (dict, list)):
-                    node = QStandardItem(str(key))
-                    parent_item.appendRow(node)
-                    self._populate_tree(node, val)
-                else:
-                    parent_item.appendRow(QStandardItem(f"{key}: {val}"))
+                self._insert_tree_node(parent_item, str(key), val)
+        # 2. 处理列表/数组结构 (🌟 修复原代码丢失数组数据的 Bug)
+        elif isinstance(data_node, list):
+            for i, val in enumerate(data_node):
+                self._insert_tree_node(parent_item, f"[{i}]", val)
+
+    def _insert_tree_node(self, parent_item, key_str, val):
+        import json
+        # ==========================================
+        # 🌟 修复 2：JSON 字符串智能展开黑科技！
+        # 如果发现这是一个 JSON 格式的字符串，尝试脱掉字符串的外衣，变成对象
+        # ==========================================
+        if isinstance(val, str):
+            val_stripped = val.strip()
+            if (val_stripped.startswith('{') and val_stripped.endswith('}')) or \
+                    (val_stripped.startswith('[') and val_stripped.endswith(']')):
+                try:
+                    val = json.loads(val_stripped)
+                except:
+                    pass  # 如果解析失败，说明只是个普通字符串，保持原样
+
+        # 如果值是字典或列表，就继续挂载新的子树枝，允许点击展开/折叠
+        if isinstance(val, (dict, list)):
+            node = QStandardItem(key_str)
+            parent_item.appendRow(node)
+            self._populate_tree(node, val)  # 递归向下层遍历
+        else:
+            # 如果是普通数值或文本，直接作为叶子节点显示
+            parent_item.appendRow(QStandardItem(f"{key_str}: {val}"))
 
     def toggle_theme(self):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
