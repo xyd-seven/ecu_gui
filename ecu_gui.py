@@ -1247,6 +1247,12 @@ class EcuMainWindow(QMainWindow):
         self.search_timer.setSingleShot(True)  # 设置为单次触发
         self.search_timer.timeout.connect(self._on_search_timer_timeout)
         self.last_search_text = ""
+        # ==========================================
+        # 🌟 性能调优：预编译正则表达式 (全局复用，极大降低 CPU 开销)
+        # ==========================================
+        self._re_nmea = re.compile(r'(\d{2,4}\.\d+),([NS]),(\d{3,5}\.\d+),([EW])')
+        self._re_kv = re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*([-+]?\d*\.?\d+)')
+        self._re_err = re.compile(r"(?i)(error|fail|timeout|异常|失败)")
 
         self.init_ui()
 
@@ -2014,7 +2020,7 @@ class EcuMainWindow(QMainWindow):
                 self.terminal_history.append({'type': 'TX', 'time': now_str, 'data': data_to_send})
 
                 if self.action_hex.isChecked():
-                    display_text = "[上行] " + " ".join(f"{b:02X}" for b in data_to_send) + "\n"
+                    display_text = "[上行] " + data_to_send.hex(' ').upper() + "\n"
                 else:
                     display_text = "[上行] " + data_to_send.decode('utf-8', errors='replace')
 
@@ -2058,8 +2064,9 @@ class EcuMainWindow(QMainWindow):
         # 🌟 新增情况 C：触顶，触发懒加载！
         # ==========================================
         if value == 0 and max_value > 0:
-            # 💡 技巧：使用定时器延时 10 毫秒执行，防止在滚动事件中直接修改 UI 导致底层死锁
-            QTimer.singleShot(10, self._load_older_history)
+            if not getattr(self, '_is_loading_history', False):
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(10, self._load_older_history)
 
     def _load_older_history(self):
         # 防连点锁
@@ -2096,18 +2103,18 @@ class EcuMainWindow(QMainWindow):
         current_chunk_time = None
         current_chunk_type = None
         current_chunk_lines = []
-        final_text = ""
+        # ✅ 新增一个列表作为大聚合桶
+        final_text_blocks = []
 
         # 内部合并逻辑 (消除时间戳墙)
         def flush_chunk():
-            nonlocal final_text
             if current_chunk_lines:
                 chunk_text = "\n".join(current_chunk_lines) + "\n"
                 show_time = getattr(self.cb_show_time, 'isChecked', lambda: True)() if hasattr(self,
                                                                                                'cb_show_time') else True
                 if show_time and current_chunk_time:
                     chunk_text = f"[{current_chunk_time}] {chunk_text}"
-                final_text += chunk_text
+                final_text_blocks.append(chunk_text)
                 current_chunk_lines.clear()
 
         for pkt in older_history:
@@ -2116,7 +2123,7 @@ class EcuMainWindow(QMainWindow):
             pkt_time = pkt.get('time')
 
             if is_hex:
-                text = " ".join(f"{b:02X}" for b in raw_bytes)
+                text = raw_bytes.hex(' ').upper()
             else:
                 text = raw_bytes.decode('utf-8', errors='replace')
 
@@ -2139,9 +2146,10 @@ class EcuMainWindow(QMainWindow):
         flush_chunk()
 
         # 4. 🌟 核心：把老数据塞进最开头，并无缝复原视窗！
-        if final_text:
+        if final_text_blocks:
+            final_text = "".join(final_text_blocks)  # O(N) 极速合并
             cursor = self.raw_log_console.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)  # 光标移到第 1 行
+            cursor.movePosition(QTextCursor.MoveOperation.Start)  # 光标移到第 1 行
 
             self.raw_log_console._is_appending = True
             cursor.insertText(final_text)  # 强行把老数据顶进去
@@ -2496,7 +2504,6 @@ class EcuMainWindow(QMainWindow):
         if write_to_file and getattr(self, 'is_recording', False) and getattr(self, 'record_file_handle', None):
             try:
                 self.record_file_handle.write(text + "\n")
-                self.record_file_handle.flush()
             except:
                 pass
 
@@ -2545,7 +2552,7 @@ class EcuMainWindow(QMainWindow):
                     display_line = line
 
                 char_format = QTextCharFormat()
-                if re.search(r"(?i)(error|fail|timeout|异常|失败)", display_line):
+                if self._re_err.search(display_line):
                     bg_color = QColor("#4A0000") if getattr(self, 'is_dark_mode', False) else QColor("#FFCCCC")
                     char_format.setBackground(bg_color)
                 else:
@@ -2618,7 +2625,7 @@ class EcuMainWindow(QMainWindow):
 
                 # 💡 注意细节：这里去掉了末尾原有的 + "\n"，交由上面的 flush_chunk 统一去拼接换行！
                 if is_hex:
-                    text = " ".join(f"{b:02X}" for b in raw_bytes)
+                    text = raw_bytes.hex(' ').upper()
                 else:
                     text = raw_bytes.decode('utf-8', errors='replace')
 
@@ -2669,7 +2676,7 @@ class EcuMainWindow(QMainWindow):
             if len(self.terminal_history) > 100000:
                 del self.terminal_history[:10000]
 
-            display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
+            display_text = raw_bytes.hex(' ').upper() + "\n"
             self.append_raw_log(display_text, custom_time=now_str, render_to_ui=True)
             return  # HEX 模式下，通常不走后续复杂的文本行协议解析
 
@@ -3374,7 +3381,7 @@ class EcuMainWindow(QMainWindow):
         # 🌟 升级 2：NMEA 报文霸王硬上弓解码
         # 匹配格式：3445.1234,N,11345.1234,E (度分格式)
         # ==========================================
-        nmea_match = re.search(r'(\d{2,4}\.\d+),([NS]),(\d{3,5}\.\d+),([EW])', text)
+        nmea_match = self._re_nmea.search(text)
         if nmea_match:
             try:
                 lat_raw, lat_dir, lng_raw, lng_dir = nmea_match.groups()
@@ -3400,8 +3407,7 @@ class EcuMainWindow(QMainWindow):
         # ==========================================
         # 原有逻辑：兼容普通的 key=val 格式
         # ==========================================
-        pattern = re.compile(r'([a-zA-Z0-9_]+)\s*[:=]\s*([-+]?\d*\.?\d+)')
-        matches = pattern.findall(text)
+        matches = self._re_kv.findall(text)
 
         for key, val_str in matches:
             try:
