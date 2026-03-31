@@ -2040,9 +2040,8 @@ class EcuMainWindow(QMainWindow):
 
     def _on_log_scrollbar_changed(self, value):
         # ==========================================
-        # 🌟 修复 1：漏掉的终极防抖锁！
-        # 只要是代码追加数据、或者 2000 行缓存触顶删行引起的跳动，
-        # 直接无视，绝对不允许触发自动滚动开关！
+        # 🌟 修复 1：防抖锁 (保持您原有的优秀设计)
+        # 只要是代码追加数据、或者缓存触顶删行引起的跳动，直接无视！
         # ==========================================
         if getattr(self.raw_log_console, '_is_appending', False):
             return
@@ -2050,9 +2049,21 @@ class EcuMainWindow(QMainWindow):
         scrollbar = self.raw_log_console.verticalScrollBar()
         max_value = scrollbar.maximum()
 
+        # 情况 A：如果用户把滚动条拉到了最底部，重新激活自动滚动
         if value == max_value and max_value > 0:
             if not self.action_autoscroll.isChecked():
                 self.action_autoscroll.setChecked(True)
+
+        # ==========================================
+        # 🌟 核心修复点：情况 B
+        # 只要滚动条当前位置不在最底部 (不管是用滚轮滚上去的，还是用鼠标拖拽上去的)
+        # 必须立刻、强制关闭自动滚动！让视窗绝对冻结！
+        # ==========================================
+        elif value < max_value:
+            if self.action_autoscroll.isChecked():
+                self.action_autoscroll.setChecked(False)
+                # 可选：在左下角给个提示，让用户知道现在是冻结状态
+                self.statusBar().showMessage("⏬ 自动滚动已暂停 (正在回看历史记录)", 2000)
 
     # ==========================================
     # 🌟 搜索/雷达与过滤核心逻辑
@@ -2387,7 +2398,13 @@ class EcuMainWindow(QMainWindow):
 
         if not render_to_ui:
             return
-
+        # ==========================================
+        # 🌟 终极冻结绝杀：如果用户关了自动滚动(正在回看)，
+        # 直接跳过黑窗口的排版和渲染！
+        # 这会让黑窗口实现 100% 的“时间静止”！
+        # ==========================================
+        if not self.action_autoscroll.isChecked():
+            return
         # ==========================================
         # 🌟 修复 2：记录追加前状态，并严格上锁
         # ==========================================
@@ -2720,16 +2737,40 @@ class EcuMainWindow(QMainWindow):
 
         # ==========================================
         # 🌟 核心防呆拦截：如果选了纯文本，直接清空底层解析器并返回！
-        # 绝对不让它去尝试打开一个叫“纯文本”的 JSON 文件
         # ==========================================
         if protocol_file == "纯文本(不解析)":
             self.decoder = None
             self.clear_all_data()
+
+            # 🌟 顺手把过滤下拉框也清空复位
+            self.combo_filter.blockSignals(True)
+            self.combo_filter.clear()
+            self.combo_filter.addItem("显示所有类型", "ALL")
+            self.combo_filter.blockSignals(False)
             return
 
         try:
             self.decoder = ProtocolDecoder(protocol_file)
             self.clear_all_data()
+
+            # ==========================================
+            # 🌟 核心修复：根据刚加载的 JSON，动态生成过滤下拉菜单！
+            # ==========================================
+            self.combo_filter.blockSignals(True)  # 暂时屏蔽信号，防止添加时疯狂触发重绘
+            self.combo_filter.clear()
+            self.combo_filter.addItem("显示所有类型", "ALL")
+
+            # 遍历协议字典里的所有报文类型
+            if hasattr(self.decoder, 'msgs') and self.decoder.msgs:
+                for msg_type_hex, msg_def in self.decoder.msgs.items():
+                    # 提取名字，为了界面清爽，我们可以把括号及里面的英文去掉
+                    msg_name = msg_def.get('name', '未知消息').split('(')[0]
+                    # 界面上显示 "0x44 状态上报V6"，底层 Data 存 "0x44"
+                    self.combo_filter.addItem(f"{msg_type_hex} {msg_name}", msg_type_hex)
+
+            self.combo_filter.blockSignals(False)  # 解除屏蔽
+
+            # 恢复底层的解析引擎
             if getattr(self, 'serial_worker', None) and self.serial_worker.isRunning():
                 self.rt_tx_parser = StreamParser(self.decoder)
                 self.rt_rx_parser = StreamParser(self.decoder)
