@@ -2065,7 +2065,6 @@ class EcuMainWindow(QMainWindow):
         # ==========================================
         if value == 0 and max_value > 0:
             if not getattr(self, '_is_loading_history', False):
-                from PyQt6.QtCore import QTimer
                 QTimer.singleShot(10, self._load_older_history)
 
     def _load_older_history(self):
@@ -2110,8 +2109,7 @@ class EcuMainWindow(QMainWindow):
         def flush_chunk():
             if current_chunk_lines:
                 chunk_text = "\n".join(current_chunk_lines) + "\n"
-                show_time = getattr(self.cb_show_time, 'isChecked', lambda: True)() if hasattr(self,
-                                                                                               'cb_show_time') else True
+                show_time = self.action_timestamp.isChecked() if hasattr(self, 'action_timestamp') else True
                 if show_time and current_chunk_time:
                     chunk_text = f"[{current_chunk_time}] {chunk_text}"
                 final_text_blocks.append(chunk_text)
@@ -2786,6 +2784,17 @@ class EcuMainWindow(QMainWindow):
                 if frame.get('seq') is None or frame.get('seq') == "N/A": frame['seq'] = "实时"
 
                 self._extract_numerical_vars(frame.get('data', {}))
+                # ==========================================
+                # 🌟 新增核心逻辑：动态将“新面孔”类型加入过滤下拉框
+                # 使用 Set(集合) 保证 O(1) 的极速判断，绝对不卡顿！
+                # ==========================================
+                frame_type = frame['type']
+                if frame_type not in getattr(self, 'appeared_msg_types', set()):
+                    if not hasattr(self, 'appeared_msg_types'):
+                        self.appeared_msg_types = set()
+                    self.appeared_msg_types.add(frame_type)
+                    # 发现新类型！把它加到下拉框里
+                    self.combo_filter.addItem(f"{frame['name']} ({frame_type})", frame_type)
 
                 target_var = self.combo_wave_var.currentText()
                 if target_var and target_var != "关闭绘制" and self.waveform_panel.isVisible():
@@ -2913,6 +2922,7 @@ class EcuMainWindow(QMainWindow):
             self.combo_filter.clear()
             self.combo_filter.addItem("显示所有类型", "ALL")
             self.combo_filter.blockSignals(False)
+            self.appeared_msg_types = set()  # 🌟 新增：切换到纯文本时也重置记忆集合
             return
 
         try:
@@ -2920,19 +2930,14 @@ class EcuMainWindow(QMainWindow):
             self.clear_all_data()
 
             # ==========================================
-            # 🌟 核心修复：根据刚加载的 JSON，动态生成过滤下拉菜单！
+            # 🌟 核心优化：只保留“全部”，其余类型等收到数据后再动态添加
             # ==========================================
-            self.combo_filter.blockSignals(True)  # 暂时屏蔽信号，防止添加时疯狂触发重绘
+            self.combo_filter.blockSignals(True)  # 暂时屏蔽信号，防止疯狂触发重绘
             self.combo_filter.clear()
             self.combo_filter.addItem("显示所有类型", "ALL")
 
-            # 遍历协议字典里的所有报文类型
-            if hasattr(self.decoder, 'msgs') and self.decoder.msgs:
-                for msg_type_hex, msg_def in self.decoder.msgs.items():
-                    # 提取名字，为了界面清爽，我们可以把括号及里面的英文去掉
-                    msg_name = msg_def.get('name', '未知消息').split('(')[0]
-                    # 界面上显示 "0x44 状态上报V6"，底层 Data 存 "0x44"
-                    self.combo_filter.addItem(f"{msg_type_hex} {msg_name}", msg_type_hex)
+            # 🌟 新增核心：用一个空的集合来准备记录即将收到的新类型
+            self.appeared_msg_types = set()
 
             self.combo_filter.blockSignals(False)  # 解除屏蔽
 
@@ -3007,9 +3012,38 @@ class EcuMainWindow(QMainWindow):
             QMessageBox.critical(self, "读取失败", f"无法读取文件内容: {str(e)}")
 
     def on_parse_finished(self, total_count):
+        # ==========================================
+        # 1. 准备重建下拉框：清空旧数据并屏蔽信号防止 UI 卡顿
+        # ==========================================
+        self.combo_filter.blockSignals(True)
+        self.combo_filter.clear()
+        self.combo_filter.addItem("显示所有类型", "ALL")
+        self.appeared_msg_types = set()
+
+        # ==========================================
+        # 2. 遍历所有离线帧：更新名字 + 收集下拉框选项
+        # ==========================================
         for frame in self.all_frames:
-            msg_def = self.decoder.msgs.get(frame['type'], {})
-            frame['name'] = msg_def.get('name', '未知消息')
+            frame_type = frame['type']
+            msg_def = self.decoder.msgs.get(frame_type, {})
+
+            # (优化您原来的逻辑：让未知消息也能显示出它的十六进制码，不再只是干巴巴的“未知消息”)
+            frame_name = msg_def.get('name', f"未知消息 ({frame_type})")
+            frame['name'] = frame_name
+
+            # 🌟 核心：只要是第一次见到的新类型，立刻加入下拉框！
+            if frame_type not in self.appeared_msg_types:
+                self.appeared_msg_types.add(frame_type)
+
+                # 提取干净的名字用于显示（去掉多余的括号）
+                clean_name = frame_name.split('(')[0].strip()
+                # 界面显示类似 "0x44 登录包"，底层存 "0x44"
+                self.combo_filter.addItem(f"{frame_type} {clean_name}", frame_type)
+
+        # 3. 循环结束，解除下拉框的封印
+        self.combo_filter.blockSignals(False)
+
+        # 4. 执行原有的表格渲染逻辑
         self.apply_filter()
 
     def apply_filter(self):
