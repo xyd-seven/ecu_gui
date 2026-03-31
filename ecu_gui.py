@@ -10,6 +10,7 @@ import math
 import socket
 
 from datetime import datetime, timezone, timedelta
+from collections import deque
 
 # 🌟 引入串口通信库
 try:
@@ -1229,12 +1230,8 @@ class EcuMainWindow(QMainWindow):
         self._last_char_was_newline = True
         self.is_recording = False
         self.record_filename = ""
-        # ==========================================
-        # 🌟 新增：历史数据缓存与 HEX 切换绑定
-        # ==========================================
-        from collections import deque
-        # 使用双端队列，最多保存最近的 2000 包数据，避免长时间挂机导致内存溢出
-        self.terminal_history = deque(maxlen=2000)
+        # 🌟 修复：改为原生 List，完美支持 10 万条切片内存保护！
+        self.terminal_history = []
 
         # ==========================================
         # 🌟 新增：波形图数据结构 (最多缓存 1000 个点，保证极速)
@@ -1850,6 +1847,7 @@ class EcuMainWindow(QMainWindow):
         self.setStyleSheet(self.get_dark_qss())
         self.apply_terminal_style()
         QTimer.singleShot(100, self.toggle_right_panel)
+        self.action_autoscroll.toggled.connect(self._on_autoscroll_toggled)
 
     # ==========================================
     # 🌟 显隐控制逻辑
@@ -2039,31 +2037,137 @@ class EcuMainWindow(QMainWindow):
             QMessageBox.critical(self, "数据转换错误", f"输入格式无法解析:\n{str(e)}")
 
     def _on_log_scrollbar_changed(self, value):
-        # ==========================================
-        # 🌟 修复 1：防抖锁 (保持您原有的优秀设计)
-        # 只要是代码追加数据、或者缓存触顶删行引起的跳动，直接无视！
-        # ==========================================
         if getattr(self.raw_log_console, '_is_appending', False):
             return
 
         scrollbar = self.raw_log_console.verticalScrollBar()
         max_value = scrollbar.maximum()
 
-        # 情况 A：如果用户把滚动条拉到了最底部，重新激活自动滚动
+        # 情况 A：触底，恢复自动滚动
         if value == max_value and max_value > 0:
             if not self.action_autoscroll.isChecked():
                 self.action_autoscroll.setChecked(True)
 
-        # ==========================================
-        # 🌟 核心修复点：情况 B
-        # 只要滚动条当前位置不在最底部 (不管是用滚轮滚上去的，还是用鼠标拖拽上去的)
-        # 必须立刻、强制关闭自动滚动！让视窗绝对冻结！
-        # ==========================================
+        # 情况 B：离开底部，冻结视窗
         elif value < max_value:
             if self.action_autoscroll.isChecked():
                 self.action_autoscroll.setChecked(False)
-                # 可选：在左下角给个提示，让用户知道现在是冻结状态
                 self.statusBar().showMessage("⏬ 自动滚动已暂停 (正在回看历史记录)", 2000)
+
+        # ==========================================
+        # 🌟 新增情况 C：触顶，触发懒加载！
+        # ==========================================
+        if value == 0 and max_value > 0:
+            # 💡 技巧：使用定时器延时 10 毫秒执行，防止在滚动事件中直接修改 UI 导致底层死锁
+            QTimer.singleShot(10, self._load_older_history)
+
+    def _load_older_history(self):
+        # 防连点锁
+        if getattr(self, '_is_loading_history', False): return
+        self._is_loading_history = True
+
+        if not hasattr(self, 'rendered_history_count'):
+            self.rendered_history_count = 2000
+
+        total_len = len(self.terminal_history)
+        if self.rendered_history_count >= total_len:
+            self.statusBar().showMessage("🔼 已经是第一条数据了", 2000)
+            self._is_loading_history = False
+            return
+
+        self.statusBar().showMessage("⏳ 正在加载更早的历史记录...", 1000)
+
+        # 1. 蒙上黑布
+        self.raw_log_console.setUpdatesEnabled(False)
+
+        # 2. 算出要拿哪一段老数据
+        start_idx = max(0, total_len - self.rendered_history_count - 2000)
+        end_idx = total_len - self.rendered_history_count
+        older_history = self.terminal_history[start_idx:end_idx]
+
+        # 3. 记住当前滚动条的“天花板”高度
+        scrollbar = self.raw_log_console.verticalScrollBar()
+        old_max = scrollbar.maximum()
+
+        is_hex = hasattr(self, 'action_hex') and self.action_hex.isChecked()
+        is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
+        filter_kw = self.search_input.text().lower() if is_filtering else ""
+
+        current_chunk_time = None
+        current_chunk_type = None
+        current_chunk_lines = []
+        final_text = ""
+
+        # 内部合并逻辑 (消除时间戳墙)
+        def flush_chunk():
+            nonlocal final_text
+            if current_chunk_lines:
+                chunk_text = "\n".join(current_chunk_lines) + "\n"
+                show_time = getattr(self.cb_show_time, 'isChecked', lambda: True)() if hasattr(self,
+                                                                                               'cb_show_time') else True
+                if show_time and current_chunk_time:
+                    chunk_text = f"[{current_chunk_time}] {chunk_text}"
+                final_text += chunk_text
+                current_chunk_lines.clear()
+
+        for pkt in older_history:
+            raw_bytes = pkt['data']
+            pkt_type = pkt.get('type')
+            pkt_time = pkt.get('time')
+
+            if is_hex:
+                text = " ".join(f"{b:02X}" for b in raw_bytes)
+            else:
+                text = raw_bytes.decode('utf-8', errors='replace')
+
+            if pkt_type == 'TX': text = "[上行] " + text
+
+            if is_filtering and filter_kw:
+                lines = text.split('\n')
+                matched_lines = [line for line in lines if filter_kw in line.lower()]
+                if not matched_lines: continue
+                text = "\n".join(matched_lines)
+
+            if current_chunk_time == pkt_time and current_chunk_type == pkt_type:
+                current_chunk_lines.append(text)
+            else:
+                flush_chunk()
+                current_chunk_time = pkt_time
+                current_chunk_type = pkt_type
+                current_chunk_lines.append(text)
+
+        flush_chunk()
+
+        # 4. 🌟 核心：把老数据塞进最开头，并无缝复原视窗！
+        if final_text:
+            cursor = self.raw_log_console.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)  # 光标移到第 1 行
+
+            self.raw_log_console._is_appending = True
+            cursor.insertText(final_text)  # 强行把老数据顶进去
+            self.raw_log_console._is_appending = False
+
+            self.rendered_history_count += len(older_history)
+
+            # Qt 视窗魔法：老数据把原来的内容往下挤了，我们只要算出挤了多少像素
+            # 把滚动条往下推对应的像素，用户肉眼看屏幕就是完全静止的！
+            new_max = scrollbar.maximum()
+            scrollbar.setValue(new_max - old_max)
+
+        # 5. 揭开黑布
+        self.raw_log_console.setUpdatesEnabled(True)
+        self._is_loading_history = False
+
+    def _on_autoscroll_toggled(self, checked):
+        if checked:
+            # 🌟 恢复滚动时：恢复最大行数限制，瞬间裁剪多余日志，防止内存溢出
+            self.raw_log_console.document().setMaximumBlockCount(20000)
+            scrollbar = self.raw_log_console.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            # 🌟 冻结视窗时：解除行数限制(0表示无限)，这样底部进新数据时，顶部绝不会被挤掉！
+            # 视窗就像死死钉住一样，实现完美的“时间静止”，且一滴日志都不会漏！
+            self.raw_log_console.document().setMaximumBlockCount(0)
 
     # ==========================================
     # 🌟 搜索/雷达与过滤核心逻辑
@@ -2399,13 +2503,6 @@ class EcuMainWindow(QMainWindow):
         if not render_to_ui:
             return
         # ==========================================
-        # 🌟 终极冻结绝杀：如果用户关了自动滚动(正在回看)，
-        # 直接跳过黑窗口的排版和渲染！
-        # 这会让黑窗口实现 100% 的“时间静止”！
-        # ==========================================
-        if not self.action_autoscroll.isChecked():
-            return
-        # ==========================================
         # 🌟 修复 2：记录追加前状态，并严格上锁
         # ==========================================
         scrollbar = self.raw_log_console.verticalScrollBar()
@@ -2481,22 +2578,52 @@ class EcuMainWindow(QMainWindow):
     # ==========================================
     def redraw_terminal_history(self):
         try:
+            # 1. 挂起视觉刷新（蒙上黑布），极大提升底层的纯文本塞入性能
             self.raw_log_console.setUpdatesEnabled(False)
             self.raw_log_console.clear()
 
-            # 🌟 修复：检查新变量 action_hex 和 btn_filter_mode
             is_hex = hasattr(self, 'action_hex') and self.action_hex.isChecked()
             is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
-            filter_kw = self.search_input.text().lower()
+            filter_kw = self.search_input.text().lower() if is_filtering else ""
 
-            for pkt in self.terminal_history:
+            # ==========================================
+            # 🌟 懒加载核心：只拿最新的 2000 条进行极速重绘！
+            # 这样无论后台挂机多久攒了多少万条数据，切换模式永远是秒切。
+            # ==========================================
+            MAX_RENDER = 2000
+            render_history = self.terminal_history[-MAX_RENDER:]
+            self.rendered_history_count = len(render_history)  # 🌟 补丁：每次全量重绘时，把计数器复位！
+
+            # ==========================================
+            # 🌟 时间戳智能合并机制 (完美消除分包墙)
+            # ==========================================
+            current_chunk_time = None
+            current_chunk_type = None
+            current_chunk_lines = []
+
+            # 内部函数：用来将攒够的一桶数据，一次性打印到屏幕
+            def flush_chunk():
+                if current_chunk_lines:
+                    # 用换行符把这批同时间的行连起来，末尾补一个换行符
+                    chunk_text = "\n".join(current_chunk_lines) + "\n"
+                    # 这里保证同一批数据，只有一个统一的时间戳！
+                    self.append_raw_log(chunk_text, custom_time=current_chunk_time, write_to_file=False,
+                                        render_to_ui=True)
+                    current_chunk_lines.clear()
+
+            for pkt in render_history:
                 raw_bytes = pkt['data']
+                pkt_type = pkt.get('type')
+                pkt_time = pkt.get('time')
+
+                # 💡 注意细节：这里去掉了末尾原有的 + "\n"，交由上面的 flush_chunk 统一去拼接换行！
                 if is_hex:
-                    text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
-                    if pkt.get('type') == 'TX': text = "[上行] " + text
+                    text = " ".join(f"{b:02X}" for b in raw_bytes)
                 else:
                     text = raw_bytes.decode('utf-8', errors='replace')
-                    if pkt.get('type') == 'TX': text = "[上行] " + text
+
+                if pkt_type == 'TX':
+                    text = "[上行] " + text
 
                 if is_filtering and filter_kw:
                     lines = text.split('\n')
@@ -2505,152 +2632,184 @@ class EcuMainWindow(QMainWindow):
                         continue
                     text = "\n".join(matched_lines)
 
-                self.append_raw_log(text, custom_time=pkt.get('time'), write_to_file=False, render_to_ui=True)
+                # ==========================================
+                # 判断：如果时间和类型一模一样，说明是刚刚同一个毫秒级的连发包裹！
+                # 直接塞进同一个聚合桶里。
+                # ==========================================
+                if current_chunk_time == pkt_time and current_chunk_type == pkt_type:
+                    current_chunk_lines.append(text)
+                else:
+                    # 发现是新的时间或类型，先把上一桶倒出来渲染
+                    flush_chunk()
+                    # 开启新的一桶
+                    current_chunk_time = pkt_time
+                    current_chunk_type = pkt_type
+                    current_chunk_lines.append(text)
+
+            # 循环结束后，别忘了把最后一桶里的也倒出来
+            flush_chunk()
 
         except Exception as e:
             print(f"🚨 重绘引擎异常: {e}")
         finally:
+            # 2. 揭开黑布，瞬间展示所有数据！
             self.raw_log_console.setUpdatesEnabled(True)
             scrollbar = self.raw_log_console.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
-            self.update_viewport_search_highlights()
+            if hasattr(self, 'update_viewport_search_highlights'):
+                self.update_viewport_search_highlights()
 
     def on_serial_data_received(self, raw_bytes):
-        now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
         # ==========================================
-        # 🌟 新增：内存保护机制（限制最大历史记录数）
+        # 模式 A：HEX 十六进制模式 (无视换行，收到碎片直接打印)
         # ==========================================
-        # 假设我们最多只在内存里保留 10 万条历史记录
-        if len(self.terminal_history) > 100000:
-            # 💡 技巧：不要每次删 1 条(pop(0)性能差)，一次性删掉最老的 1 万条，效率极高！
-            del self.terminal_history[:10000]
-
-        # 🌟 修复：检查新变量 action_hex
         if hasattr(self, 'action_hex') and self.action_hex.isChecked():
+            now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': raw_bytes})
+            if len(self.terminal_history) > 100000:
+                del self.terminal_history[:10000]
+
             display_text = " ".join(f"{b:02X}" for b in raw_bytes) + "\n"
-        else:
-            display_text = raw_bytes.decode('utf-8', errors='replace')
-            text_vars = self._sniff_raw_text_vars(display_text)
+            self.append_raw_log(display_text, custom_time=now_str, render_to_ui=True)
+            return  # HEX 模式下，通常不走后续复杂的文本行协议解析
+
+        # ==========================================
+        # 模式 B：ASCII 文本模式 (核心修复：完美拼包后再打时间戳！)
+        # ==========================================
+        text = raw_bytes.decode('utf-8', errors='replace')
+
+        if not hasattr(self, 'serial_buffer_line'):
+            self.serial_buffer_line = ""
+        self.serial_buffer_line += text
+
+        if '\n' not in self.serial_buffer_line:
+            return
+
+        lines = self.serial_buffer_line.split('\n')
+        self.serial_buffer_line = lines.pop()
+
+        parsed_frames = []
+
+        # ==========================================
+        # 🌟 核心修复 1：准备一个“显示聚合桶”和统一的时间戳
+        # 这一批次瞬间到达的所有数据，共用同一个时间戳！
+        # ==========================================
+        display_chunk = []
+        now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+
+        for line in lines:
+            clean_line = line.strip()
+            if not clean_line: continue
+
+            # 记录历史 (按行独立存入内存，保证底层结构依然精确)
+            self.terminal_history.append({'type': 'RX', 'time': now_str, 'data': line.encode('utf-8')})
+            if len(self.terminal_history) > 100000:
+                del self.terminal_history[:10000]
+
+            # 提取波形变量
+            text_vars = self._sniff_raw_text_vars(line)
             target_var = self.combo_wave_var.currentText()
             if target_var and target_var != "关闭绘制" and getattr(self, 'waveform_panel',
                                                                    None) and self.waveform_panel.isVisible():
                 if target_var in text_vars:
                     self.update_plot_data(text_vars[target_var])
 
-        allow_render = True
-        # 🌟 修复：检查新变量 btn_filter_mode
-        is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
-
-        if is_filtering:
-            filter_kw = self.search_input.text().lower()
-            if filter_kw:
-                lines = display_text.split('\n')
-                matched_lines = [line for line in lines if filter_kw in line.lower()]
-                if not matched_lines:
+            # 搜索过滤控制
+            allow_render = True
+            is_filtering = hasattr(self, 'btn_filter_mode') and self.btn_filter_mode.isChecked()
+            if is_filtering:
+                filter_kw = self.search_input.text().lower()
+                if filter_kw and filter_kw not in line.lower():
                     allow_render = False
+
+            # 🌟 核心修复 2：如果允许显示，不要马上打印！先扔进聚合桶里！
+            if allow_render:
+                display_chunk.append(line)
+
+            # --- 下面进入原有的后台解析引擎 ---
+            if self.combo_protocol.currentText() == "纯文本(不解析)":
+                continue
+
+            line_lower = clean_line.lower()
+
+            # 动态白名单逻辑
+            if "d/hex" in line_lower:
+                # 只要是这台终端特有的 D/HEX 日志，无视协议叫什么名字，强制开启最严过滤！
+                if "nb_recv" in line_lower:
+                    self._current_parse_target = "RX"
+                elif "nb_send" in line_lower:
+                    self._current_parse_target = "TX"
                 else:
-                    display_text = "\n".join(matched_lines)
+                    self._current_parse_target = "IGNORE"  # loop, ctrl, ble 等一律物理拉黑！
+            else:
+                # 只有非 D/HEX 的其他厂家的普通日志，才走宽泛的关键字嗅探
+                if any(k in line_lower for k in ["recv", "接收", "下行", "rx"]):
+                    self._current_parse_target = "RX"
+                elif any(k in line_lower for k in ["send", "发送", "上行", "tx"]):
+                    self._current_parse_target = "TX"
 
-        self.append_raw_log(display_text, custom_time=now_str, render_to_ui=allow_render)
+            target = getattr(self, '_current_parse_target', "IGNORE")
+            if target == "IGNORE":
+                continue
 
-        if self.combo_protocol.currentText() == "纯文本(不解析)":
-            return
+            parser = self.rt_rx_parser if target == "RX" else self.rt_tx_parser
+            if parser:
+                _f = parser.feed(clean_line)
+                if _f:
+                    for f in _f: f['direction'] = '[下行]' if target == "RX" else '[上行]'
+                    parsed_frames.extend(_f)
 
         # ==========================================
-        # 🌟 2. 处理后台解析引擎 (不受 UI 开关影响)
+        # 🌟 核心修复 3：统一渲染！
+        # 将聚合桶里的多行数据，用换行符连起来，一次性发送给 UI
+        # 这样时间戳永远只在这一个数据块的最顶端显示！
         # ==========================================
-        # 为了兼容原有的正则解析逻辑，我们将字节流解码为文本后喂给解析器池
-        text_for_parser = raw_bytes.decode('utf-8', errors='replace')
-        self.serial_buffer_line += text_for_parser
+        if display_chunk:
+            chunk_text = "\n".join(display_chunk) + "\n"
+            self.append_raw_log(chunk_text, custom_time=now_str, render_to_ui=True)
 
-        if '\n' in self.serial_buffer_line:
-            lines = self.serial_buffer_line.split('\n')
-            self.serial_buffer_line = lines.pop()
-            parsed_frames = []
-            for line in lines:
-                clean_line = line.strip()
-                if not clean_line: continue
-                line_lower = clean_line.lower()
 
-                # ==========================================
-                # 🌟 终极护城河：严格白名单模式
-                # 遇到非 nb_ 的 HEX 日志（ble, ctrl, loop），直接开启“拉黑”状态
-                # ==========================================
-                if "d/hex" in line_lower:
-                    if "nb_recv" in line_lower:
-                        self._current_parse_target = "RX"
-                    elif "nb_send" in line_lower:
-                        self._current_parse_target = "TX"
-                    else:
-                        self._current_parse_target = "IGNORE"  # 其他一律拉黑
+        # ==========================================
+        # 处理解析出来的表格帧数据 (原封不动保留)
+        # ==========================================
+        if parsed_frames:
+            for frame in parsed_frames:
+                msg_def = self.decoder.msgs.get(frame['type'], {})
+                frame['name'] = msg_def.get('name', '未知消息')
+                if frame.get('seq') is None or frame.get('seq') == "N/A": frame['seq'] = "实时"
 
-                # 检查当前“白名单”状态
-                target = getattr(self, '_current_parse_target', "IGNORE")
-                if target == "IGNORE":
-                    continue  # 🌟 核心：直接丢弃，绝对不允许喂给解析器！
+                self._extract_numerical_vars(frame.get('data', {}))
 
-                parser = self.rt_rx_parser if target == "RX" else self.rt_tx_parser
-                if parser:
-                    _f = parser.feed(clean_line)
-                    if _f:
-                        for f in _f:
-                            f['direction'] = '[下行]' if target == "RX" else '[上行]'
-                        parsed_frames.extend(_f)
+                target_var = self.combo_wave_var.currentText()
+                if target_var and target_var != "关闭绘制" and self.waveform_panel.isVisible():
+                    val = self._extract_value_from_frame(frame, target_var)
+                    if val is not None:
+                        self.update_plot_data(val)
 
-            if parsed_frames:
-                for frame in parsed_frames:
-                    msg_def = self.decoder.msgs.get(frame['type'], {})
-                    frame['name'] = msg_def.get('name', '未知消息')
-                    if frame.get('seq') is None or frame.get('seq') == "N/A": frame['seq'] = "实时"
+            self.all_frames.extend(parsed_frames)
+            target_type = self.combo_filter.currentData()
 
-                    # ==========================================
-                    # 🌟 1. 动态嗅探报文中的所有“数值型变量”供下拉框选择
-                    # ==========================================
-                    self._extract_numerical_vars(frame.get('data', {}))
+            if target_type == "ALL" or not target_type:
+                self.filtered_frames.extend(parsed_frames)
+                self.table_model.append_frames(parsed_frames)
+            else:
+                valid_frames = [f for f in parsed_frames if f['type'] == target_type]
+                if valid_frames:
+                    self.filtered_frames.extend(valid_frames)
+                    self.table_model.append_frames(valid_frames)
 
-                    # ==========================================
-                    # 🌟 2. 如果开启了波形图且选中了变量，则抽取数据打点！
-                    # ==========================================
-                    target_var = self.combo_wave_var.currentText()
-                    if target_var and target_var != "关闭绘制" and self.waveform_panel.isVisible():
-                        val = self._extract_value_from_frame(frame, target_var)
-                        if val is not None:
-                            self.update_plot_data(val)  # 🌟 统一调用接口
-
-                self.all_frames.extend(parsed_frames)
-                target_type = self.combo_filter.currentData()
-
-                # 1. 常规极速追加逻辑 (保证 99% 的时间表格渲染丝滑无卡顿)
+            MAX_TABLE_ROWS = 100000
+            if len(self.all_frames) > MAX_TABLE_ROWS:
+                del self.all_frames[:10000]
                 if target_type == "ALL" or not target_type:
-                    self.filtered_frames.extend(parsed_frames)
-                    self.table_model.append_frames(parsed_frames)
+                    self.filtered_frames = self.all_frames[:]
                 else:
-                    valid_frames = [f for f in parsed_frames if f['type'] == target_type]
-                    if valid_frames:
-                        self.filtered_frames.extend(valid_frames)
-                        self.table_model.append_frames(valid_frames)
+                    self.filtered_frames = [f for f in self.all_frames if f['type'] == target_type]
+                self.table_model.update_data(self.filtered_frames)
 
-                # ==========================================
-                # 🌟 核心修复：表格内存保护机制 (限制最大 10 万条)
-                # ==========================================
-                MAX_TABLE_ROWS = 100000
-                if len(self.all_frames) > MAX_TABLE_ROWS:
-                    # 1. 裁剪总数据池 (切片删除最老的 1 万条，性能极高)
-                    del self.all_frames[:10000]
-
-                    # 2. 重新根据当前的过滤规则洗一次数据
-                    if target_type == "ALL" or not target_type:
-                        self.filtered_frames = self.all_frames[:]
-                    else:
-                        self.filtered_frames = [f for f in self.all_frames if f['type'] == target_type]
-
-                    # 3. 强行通知 Qt 表格进行一次全量重绘，切断与旧数据的指针绑定
-                    self.table_model.update_data(self.filtered_frames)
-
-                # 触底自动滚动
-                if self.cb_table_auto_scroll.isChecked() and self.filtered_frames:
-                    self.table_view.scrollToBottom()
+            if getattr(self, 'cb_table_auto_scroll',
+                       None) and self.cb_table_auto_scroll.isChecked() and self.filtered_frames:
+                self.table_view.scrollToBottom()
 
     def save_raw_log(self):
         text = self.raw_log_console.toPlainText()
